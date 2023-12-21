@@ -96,6 +96,8 @@ typedef enum {
     XENIUM_MEMORY_STATE_NORMAL,
     XENIUM_MEMORY_STATE_CFI,
     XENIUM_MEMORY_STATE_AUTOSELECT,
+    XENIUM_MEMORY_STATE_SECTOR_ERASE,
+    XENIUM_MEMORY_STATE_WRITE,
 } XeniumMemoryState;
 
 typedef struct XeniumState {
@@ -250,6 +252,36 @@ static void flash_write(void *opaque, hwaddr offset, uint64_t value,
         return;
     }
 
+    if (s->flash_state == XENIUM_MEMORY_STATE_WRITE)
+    {
+        DPRINTF("%s Flash Write offset = %08x, value %02x\n", __FUNCTION__, offset, value);
+
+        //Handle mirroring
+        offset %= XeniumBank[s->bank_control].size;
+        //Handle banking
+        offset |= XeniumBank[s->bank_control].offset;
+        if (size == 1) {
+            uint8_t *flash_mem = (uint8_t *)xenium_raw;
+            flash_mem[offset] = (uint8_t)value;
+        }
+        else if (size == 2) {
+            uint16_t *flash_mem = (uint16_t *)xenium_raw;
+            flash_mem[offset/2] = (uint16_t)value;
+        }
+        else if (size == 4) {
+            uint32_t *flash_mem = (uint32_t *)xenium_raw;
+            flash_mem[offset/4] = (uint32_t)value;
+        }
+        else {
+            DPRINTF("%s Unsupported write len %d\n", __FUNCTION__, size);
+            assert(0);
+        }
+
+        s->flash_state = XENIUM_MEMORY_STATE_NORMAL;
+        s->flash_cycle = 1;
+        return;
+    }
+
     switch (s->flash_cycle)
     {
         case 1:
@@ -275,13 +307,38 @@ static void flash_write(void *opaque, hwaddr offset, uint64_t value,
             }
             break;
         case 3:
-            if(offset == 0xAAAA && value == 0x90 && size == 1) {
+            if(offset == 0xAAAA && value == 0x80 && size == 1) {
+                s->flash_cycle++;
+            }
+            else if(offset == 0xAAAA && value == 0x90 && size == 1) {
                 DPRINTF("%s Entering Autoselect Mode flash state\n", __FUNCTION__);
 
                 s->flash_state = XENIUM_MEMORY_STATE_AUTOSELECT;
             }
+            else if(offset == 0xAAAA && value == 0xA0 && size == 1) {
+                DPRINTF("%s Entering flash write state\n", __FUNCTION__);
+
+                s->flash_state = XENIUM_MEMORY_STATE_WRITE;
+            }
             else {
                 DPRINTF("%s Unimplemented Flash command\n", __FUNCTION__);
+            }
+            break;
+        case 4:
+            if(offset == 0xAAAA && value == 0xAA && size == 1) {
+                s->flash_cycle++;
+            }
+            break;
+        case 5:
+            if(offset == 0x5555 && value == 0x55 && size == 1) {
+                s->flash_cycle++;
+            }
+            break;
+        case 6:
+            if(value == 0x30 && size == 1) {
+                DPRINTF("%s Entering Sector Erase State, Offset = %04llx\n", __FUNCTION__, offset);
+                
+                s->flash_state = XENIUM_MEMORY_STATE_SECTOR_ERASE;
             }
             break;
     }

@@ -15,6 +15,8 @@ specific_ss.add(files(
 	'xbox.c',
 	'xbox_pci.c',
 	'xid.c',
+	'smbus_hdmi.c',
+	'smbus_hdmi2.c',
 	))
 subdir('nv2a')
 subdir('mcpx')

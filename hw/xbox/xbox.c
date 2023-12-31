@@ -324,6 +324,9 @@ void xbox_init_common(MachineState *machine,
         smbus_xcalibur_init(smbus, 0x70);
     }
 
+    smbus_hdmi_init(smbus, 0x44);
+    smbus_hdmi2_init(smbus, 0x43);
+
     /* USB */
     PCIDevice *usb1 = pci_new(PCI_DEVFN(3, 0), "pci-ohci");
     qdev_prop_set_uint32(&usb1->qdev, "num-ports", 4);

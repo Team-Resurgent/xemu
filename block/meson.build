@@ -39,6 +39,7 @@ block_ss.add(files(
   'throttle.c',
   'throttle-groups.c',
   'write-threshold.c',
+  'chd.c',
   'cci.c',
   'lz4.c',
 ), zstd, zlib)

@@ -35,7 +35,6 @@
 #include "qemu-version.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-block.h"
-#include "qemu/cutils.h"
 #include "qobject/qdict.h"
 #include "ui/console.h"
 #include "ui/input.h"
@@ -1405,9 +1404,11 @@ static const char *xemu_disc_blockdrv_for_path(const char *path)
     if (len >= 4) {
         const char *s = path + len - 4;
 
-        if (g_ascii_strcasecmp(s, ".chd") == 0) {
+        if (g_ascii_strcasecmp(s, ".cci") == 0) {
+            return "cci";
+        } else if (g_ascii_strcasecmp(s, ".chd") == 0) {
             return "chd";
-        }
+        }}
     }
     return "raw";
 }

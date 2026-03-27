@@ -29,6 +29,7 @@
 #include "qemu/sockets.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
+#include "qemu/option.h"
 #include "qemu/qemu-print.h"
 
 #include "chardev/char-io.h"
@@ -41,6 +42,7 @@ struct PtyChardev {
 
     int connected;
     GSource *timer_src;
+    char *path;
 };
 typedef struct PtyChardev PtyChardev;
 
@@ -93,9 +95,7 @@ static void pty_chr_update_read_handler(Chardev *chr)
     pfd.fd = fioc->fd;
     pfd.events = G_IO_OUT;
     pfd.revents = 0;
-    do {
-        rc = g_poll(&pfd, 1, 0);
-    } while (rc == -1 && errno == EINTR);
+    rc = RETRY_ON_EINTR(g_poll(&pfd, 1, 0));
     assert(rc >= 0);
 
     if (pfd.revents & G_IO_HUP) {
@@ -108,11 +108,27 @@ static void pty_chr_update_read_handler(Chardev *chr)
 static int char_pty_chr_write(Chardev *chr, const uint8_t *buf, int len)
 {
     PtyChardev *s = PTY_CHARDEV(chr);
+    GPollFD pfd;
+    int rc;
 
-    if (!s->connected) {
-        return len;
+    if (s->connected) {
+        return io_channel_send(s->ioc, buf, len);
     }
-    return io_channel_send(s->ioc, buf, len);
+
+    /*
+     * The other side might already be re-connected, but the timer might
+     * not have fired yet. So let's check here whether we can write again:
+     */
+    pfd.fd = QIO_CHANNEL_FILE(s->ioc)->fd;
+    pfd.events = G_IO_OUT;
+    pfd.revents = 0;
+    rc = RETRY_ON_EINTR(g_poll(&pfd, 1, 0));
+    g_assert(rc >= 0);
+    if (!(pfd.revents & G_IO_HUP) && (pfd.revents & G_IO_OUT)) {
+        return io_channel_send(s->ioc, buf, len);
+    }
+
+    return len;
 }
 
 static GSource *pty_chr_add_watch(Chardev *chr, GIOCondition cond)
@@ -138,7 +154,7 @@ static gboolean pty_chr_read(QIOChannel *chan, GIOCondition cond, void *opaque)
     Chardev *chr = CHARDEV(opaque);
     PtyChardev *s = PTY_CHARDEV(opaque);
     gsize len;
-    uint8_t buf[CHR_READ_BUF_LEN];
+    QEMU_UNINITIALIZED uint8_t buf[CHR_READ_BUF_LEN];
     ssize_t ret;
 
     len = sizeof(buf);
@@ -165,6 +181,9 @@ static void pty_chr_state(Chardev *chr, int connected)
 
     if (!connected) {
         remove_fd_in_watch(chr);
+        if (s->connected) {
+            qemu_chr_be_event(chr, CHR_EVENT_CLOSED);
+        }
         s->connected = 0;
         /* (re-)connect poll interval for idle guests: once per second.
          * We check more frequently in case the guests sends data to
@@ -190,10 +209,15 @@ static void char_pty_finalize(Object *obj)
     Chardev *chr = CHARDEV(obj);
     PtyChardev *s = PTY_CHARDEV(obj);
 
+    /* unlink symlink */
+    if (s->path) {
+        unlink(s->path);
+        g_free(s->path);
+    }
+
     pty_chr_state(chr, 0);
     object_unref(OBJECT(s->ioc));
     pty_chr_timer_cancel(s);
-    qemu_chr_be_event(chr, CHR_EVENT_CLOSED);
 }
 
 #if defined HAVE_PTY_H
@@ -316,6 +340,7 @@ static void char_pty_open(Chardev *chr,
     int master_fd, slave_fd;
     char pty_name[PATH_MAX];
     char *name;
+    char *path = backend->u.pty.data->path;
 
     master_fd = qemu_openpty_raw(&slave_fd, pty_name);
     if (master_fd < 0) {
@@ -324,8 +349,8 @@ static void char_pty_open(Chardev *chr,
     }
 
     close(slave_fd);
-    if (!g_unix_set_fd_nonblocking(master_fd, true, NULL)) {
-        error_setg_errno(errp, errno, "Failed to set FD nonblocking");
+    if (!qemu_set_blocking(master_fd, false, errp)) {
+        close(master_fd);
         return;
     }
 
@@ -336,16 +361,40 @@ static void char_pty_open(Chardev *chr,
     s = PTY_CHARDEV(chr);
     s->ioc = QIO_CHANNEL(qio_channel_file_new_fd(master_fd));
     name = g_strdup_printf("chardev-pty-%s", chr->label);
-    qio_channel_set_name(QIO_CHANNEL(s->ioc), name);
+    qio_channel_set_name(s->ioc, name);
     g_free(name);
     s->timer_src = NULL;
     *be_opened = false;
+
+    /* create symbolic link */
+    if (path) {
+        int res = symlink(pty_name, path);
+
+        if (res != 0) {
+            error_setg_errno(errp, errno, "Failed to create PTY symlink");
+        } else {
+            s->path = g_strdup(path);
+        }
+    }
 }
 
-static void char_pty_class_init(ObjectClass *oc, void *data)
+static void char_pty_parse(QemuOpts *opts, ChardevBackend *backend,
+                           Error **errp)
+{
+    const char *path = qemu_opt_get(opts, "path");
+    ChardevPty *pty;
+
+    backend->type = CHARDEV_BACKEND_KIND_PTY;
+    pty = backend->u.pty.data = g_new0(ChardevPty, 1);
+    qemu_chr_parse_common(opts, qapi_ChardevPty_base(pty));
+    pty->path = g_strdup(path);
+}
+
+static void char_pty_class_init(ObjectClass *oc, const void *data)
 {
     ChardevClass *cc = CHARDEV_CLASS(oc);
 
+    cc->parse = char_pty_parse;
     cc->open = char_pty_open;
     cc->chr_write = char_pty_chr_write;
     cc->chr_update_read_handler = pty_chr_update_read_handler;

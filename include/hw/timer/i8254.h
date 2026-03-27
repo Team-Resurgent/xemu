@@ -64,7 +64,8 @@ static inline ISADevice *i8254_pit_init(ISABus *bus, int base, int isa_irq,
     qdev_prop_set_uint32(dev, "iobase", base);
     isa_realize_and_unref(d, bus, &error_fatal);
     qdev_connect_gpio_out(dev, 0,
-                          isa_irq >= 0 ? isa_get_irq(d, isa_irq) : alt_irq);
+                          isa_irq >= 0 ? isa_bus_get_irq(bus, isa_irq)
+                                       : alt_irq);
 
     return d;
 }
@@ -82,7 +83,7 @@ static inline ISADevice *kvm_pit_init(ISABus *bus, int base)
     return d;
 }
 
-void pit_set_gate(ISADevice *dev, int channel, int val);
-void pit_get_channel_info(ISADevice *dev, int channel, PITChannelInfo *info);
+void pit_set_gate(PITCommonState *pit, int channel, int val);
+void pit_get_channel_info(PITCommonState *pit, int channel, PITChannelInfo *info);
 
 #endif /* HW_I8254_H */

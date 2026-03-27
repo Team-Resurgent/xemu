@@ -1,7 +1,7 @@
 //
 // xemu User Interface
 //
-// Copyright (C) 2020-2022 Matt Borgerson
+// Copyright (C) 2020-2025 Matt Borgerson
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -17,25 +17,27 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 #include "common.hh"
+#include "qemu/http.h"
 #include "update.hh"
 #include "viewport-manager.hh"
 #include <stdio.h>
 #include <stdlib.h>
-#include <SDL_filesystem.h>
+#include <SDL3/SDL_filesystem.h>
 #include "util/miniz/miniz.h"
 #include "xemu-version.h"
+#include <nlohmann/json.hpp>
 
-#if defined(_WIN32)
-const char *version_host = "raw.githubusercontent.com";
-const char *version_uri = "/mborgerson/xemu/ppa-snapshot/XEMU_VERSION";
-const char *download_host = "github.com";
-const char *download_uri = "/mborgerson/xemu/releases/latest/download/xemu-win-release.zip";
+using json = nlohmann::json;
+
+const char *releases_url = "https://api.github.com/repos/xemu-project/xemu/releases/latest";
+
+#if defined(__x86_64__)
+#define PACKAGE_ARCH "x86_64"
+#elif defined(__aarch64__)
+#define PACKAGE_ARCH "arm64"
 #else
-FIXME
+#error Unhandled package arch
 #endif
-
-#define CPPHTTPLIB_OPENSSL_SUPPORT 1
-#include <httplib.h>
 
 #define DPRINTF(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__);
 
@@ -80,12 +82,26 @@ void AutoUpdateWindow::Draw()
     };
 
     if (updater.get_status() == UPDATER_IDLE) {
-        ImGui::Text(available_msg[updater.get_update_availability()]);
+        ImGui::Text("%s", available_msg[updater.get_update_availability()]);
     } else {
-        ImGui::Text(status_msg[updater.get_status()]);
+        ImGui::Text("%s", status_msg[updater.get_status()]);
+    }
+
+    if (updater.is_update_available()) {
+        ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().WindowPadding.y));
+
+        ImGui::Text("Current version: %s", xemu_version);
+        ImGui::Text("Latest version: %s", updater.get_release_version().c_str());
+
+        ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y));
+
+        if (ImGui::SmallButton("Release notes...")) {
+            SDL_OpenURL(updater.get_release_url().c_str());
+        }
     }
 
     if (updater.is_updating()) {
+        ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y));
         ImGui::ProgressBar(updater.get_update_progress_percentage()/100.0f,
                            ImVec2(-1.0f, 0.0f));
     }
@@ -126,7 +142,7 @@ Updater::Updater()
     m_status = UPDATER_IDLE;
     m_update_availability = UPDATE_AVAILABILITY_UNKNOWN;
     m_update_percentage = 0;
-    m_latest_version = "Unknown";
+    m_release_version = "Unknown";
     m_should_cancel = false;
 }
 
@@ -148,28 +164,53 @@ void *Updater::checker_thread_worker_func(void *updater)
 
 void Updater::check_for_update_internal()
 {
-    httplib::SSLClient cli(version_host, 443);
-    cli.set_follow_location(true);
-    auto res = cli.Get(version_uri, [this](uint64_t len, uint64_t total) {
-        m_update_percentage = len*100/total;
-        return !m_should_cancel;
-    });
+    g_autoptr(GByteArray) data = g_byte_array_new();
+    int res = http_get(releases_url, data, NULL, NULL);
+
     if (m_should_cancel) {
         m_should_cancel = false;
         m_status = UPDATER_IDLE;
         goto finished;
-    } else if (!res || res->status != 200) {
+    } else if (res != 200) {
         m_status = UPDATER_ERROR;
         goto finished;
     }
 
-    if (strcmp(xemu_version, res->body.c_str())) {
-        m_update_availability = UPDATE_AVAILABLE;
-    } else {
-        m_update_availability = UPDATE_NOT_AVAILABLE;
+    try {
+        json release = json::parse(std::string((const char *)data->data, data->len));
+        m_release_url = release.value("html_url", "https://github.com/xemu-project/xemu/releases/latest");
+        m_release_version = release["tag_name"].get<std::string>();
+        if (!m_release_version.empty() && m_release_version[0] == 'v') {
+            m_release_version = m_release_version.substr(1);
+        }
+
+        m_release_package_url.clear();
+        std::string expected_filename = "xemu-" + m_release_version + "-windows-" PACKAGE_ARCH ".zip";
+        for (const auto &asset : release["assets"]) {
+            std::string name = asset["name"].get<std::string>();
+            if (name == expected_filename) {
+                m_release_package_url = asset["browser_download_url"].get<std::string>();
+                break;
+            }
+        }
+
+        if (m_release_package_url.empty()) {
+            DPRINTF("Could not find asset matching %s\n", expected_filename.c_str());
+            m_status = UPDATER_ERROR;
+            goto finished;
+        }
+
+        if (m_release_version != xemu_version) {
+            m_update_availability = UPDATE_AVAILABLE;
+        } else {
+            m_update_availability = UPDATE_NOT_AVAILABLE;
+        }
+    } catch (const json::exception &e) {
+        DPRINTF("JSON parse error: %s\n", e.what());
+        m_status = UPDATER_ERROR;
+        goto finished;
     }
 
-    m_latest_version = res->body;
     m_status = UPDATER_IDLE;
 finished:
     if (m_on_complete) {
@@ -193,27 +234,41 @@ void *Updater::update_thread_worker_func(void *updater)
     return NULL;
 }
 
+int Updater::progress_cb(http_progress_cb_info *info)
+{
+    if (info->dltotal == 0) {
+        m_update_percentage = 0;
+    } else {
+        m_update_percentage = info->dlnow*100/info->dltotal;
+    }
+
+    return m_should_cancel;
+}
+
 void Updater::update_internal()
 {
-    httplib::SSLClient cli(download_host, 443);
-    cli.set_follow_location(true);
-    auto res = cli.Get(download_uri, [this](uint64_t len, uint64_t total) {
-        m_update_percentage = len*100/total;
-        return !m_should_cancel;
-    });
+    g_autoptr(GByteArray) data = g_byte_array_new();
+
+    http_progress_cb_info progress_info;
+    progress_info.userptr = this;
+    progress_info.progress = [](http_progress_cb_info *info) {
+        return static_cast<Updater *>(info->userptr)->progress_cb(info);
+    };
+
+    int res = http_get(m_release_package_url.c_str(), data, &progress_info, NULL);
 
     if (m_should_cancel) {
         m_should_cancel = false;
         m_status = UPDATER_IDLE;
         return;
-    } else if (!res || res->status != 200) {
+    } else if (res != 200) {
         m_status = UPDATER_ERROR;
         return;
     }
 
     mz_zip_archive zip;
     mz_zip_zero_struct(&zip);
-    if (!mz_zip_reader_init_mem(&zip, res->body.data(), res->body.size(), 0)) {
+    if (!mz_zip_reader_init_mem(&zip, data->data, data->len, 0)) {
         DPRINTF("mz_zip_reader_init_mem failed\n");
         m_status = UPDATER_ERROR;
         return;

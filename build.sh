@@ -36,7 +36,6 @@ package_macos() {
     dylibbundler -cd -of -b -x dist/xemu.app/Contents/MacOS/xemu \
         -d ${lib_path}/ \
         -p "@executable_path/${lib_rpath}/" \
-        -s ${PWD}/macos-libs/${target_arch}/opt/local/libexec/openssl11/lib/ \
         -s ${PWD}/macos-libs/${target_arch}/opt/local/lib/
 
     # Fixup some paths dylibbundler missed
@@ -67,8 +66,14 @@ package_macos() {
 
     cp Info.plist dist/xemu.app/Contents/
 
-    plutil -replace CFBundleShortVersionString -string $(cat ${project_source_dir}/XEMU_VERSION | cut -f1 -d-) dist/xemu.app/Contents/Info.plist
-    plutil -replace CFBundleVersion            -string $(cat ${project_source_dir}/XEMU_VERSION | cut -f1 -d-) dist/xemu.app/Contents/Info.plist
+    if [[ -e "${project_source_dir}/XEMU_VERSION" ]]; then
+      xemu_version="$(cat ${project_source_dir}/XEMU_VERSION | cut -f1 -d-)"
+    else
+      xemu_version="0.0.0"
+    fi
+
+    plutil -replace CFBundleShortVersionString -string "${xemu_version}" dist/xemu.app/Contents/Info.plist
+    plutil -replace CFBundleVersion            -string "${xemu_version}" dist/xemu.app/Contents/Info.plist
 
     codesign --force --deep --preserve-metadata=entitlements,requirements,flags,runtime --sign - "${exe_path}"
     python3 ./scripts/gen-license.py --version-file=macos-libs/$target_arch/INSTALLED > dist/LICENSE.txt
@@ -158,8 +163,6 @@ target="qemu-system-i386"
 if test ! -z "$debug"; then
     build_cflags='-DXEMU_DEBUG_BUILD=1'
     opts="--enable-debug --enable-trace-backends=log"
-else
-    opts="--enable-lto"
 fi
 
 most_recent_macosx_sdk_ver () {
@@ -199,9 +202,9 @@ case "$platform" in # Adjust compilation options based on platform
     Darwin)
         echo "Compiling for MacOS for $target_arch..."
         if [ "$target_arch" == "arm64" ]; then
-            macos_min_ver=11.3
+            macos_min_ver=14.0
         elif [ "$target_arch" == "x86_64" ]; then
-            macos_min_ver=10.13
+            macos_min_ver=12.7.5
         else
             echo "Unsupported arch $target_arch"
             exit 1
@@ -215,26 +218,28 @@ case "$platform" in # Adjust compilation options based on platform
 
         python3 ./scripts/download-macos-libs.py ${target_arch}
         lib_prefix=${PWD}/macos-libs/${target_arch}/opt/local
-        export CFLAGS="-arch ${target_arch} \
+        export CFLAGS="${CFLAGS} \
+                       -arch ${target_arch} \
                        -target ${target_arch}-apple-macos${macos_min_ver} \
                        -isysroot ${sdk} \
                        -I${lib_prefix}/include \
                        -mmacosx-version-min=$macos_min_ver"
-        export LDFLAGS="-arch ${target_arch} \
+        export LDFLAGS="${LDFLAGS} \
+                        -arch ${target_arch} \
                         -isysroot ${sdk}"
         if [ "$target_arch" == "x86_64" ]; then
             sys_cflags='-march=ivybridge'
         fi
         sys_ldflags='-headerpad_max_install_names'
-        export PKG_CONFIG_PATH="${lib_prefix}/lib/pkgconfig"
-        export PKG_CONFIG_PATH="$PKG_CONFIG_PATH:${lib_prefix}/libexec/openssl11/lib/pkgconfig"
+        export PKG_CONFIG_LIBDIR="${lib_prefix}/lib/pkgconfig"
         opts="$opts --disable-cocoa --cross-prefix="
         postbuild='package_macos'
         ;;
     CYGWIN*|MINGW*|MSYS*)
         echo 'Compiling for Windows...'
         sys_cflags='-Wno-error'
-        opts="$opts --disable-fortify-source"
+        CFLAGS="${CFLAGS} -lIphlpapi -lCrypt32" # workaround for linking libs on mingw
+        opts="$opts"
         postbuild='package_windows' # set the above function to be called after build
         target="qemu-system-i386w.exe"
         ;;
@@ -242,7 +247,7 @@ case "$platform" in # Adjust compilation options based on platform
         echo 'Cross-compiling for Windows...'
         export AR=${AR:-$CROSSAR}
         sys_cflags='-Wno-error'
-        opts="$opts --cross-prefix=$CROSSPREFIX --static --disable-fortify-source"
+        opts="$opts --cross-prefix=$CROSSPREFIX --static"
         postbuild='package_wincross' # set the above function to be called after build
         target="qemu-system-i386w.exe"
         ;;

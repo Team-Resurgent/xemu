@@ -157,7 +157,7 @@ static const VMStateDescription armsse_mhu_vmstate = {
     .name = "armsse-mhu",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(cpu0intr, ARMSSEMHU),
         VMSTATE_UINT32(cpu1intr, ARMSSEMHU),
         VMSTATE_END_OF_LIST()
@@ -176,11 +176,11 @@ static void armsse_mhu_init(Object *obj)
     sysbus_init_irq(sbd, &s->cpu1irq);
 }
 
-static void armsse_mhu_class_init(ObjectClass *klass, void *data)
+static void armsse_mhu_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = armsse_mhu_reset;
+    device_class_set_legacy_reset(dc, armsse_mhu_reset);
     dc->vmsd = &armsse_mhu_vmstate;
 }
 

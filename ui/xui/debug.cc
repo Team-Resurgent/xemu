@@ -16,11 +16,14 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
+#include <inttypes.h>
 #include "debug.hh"
 #include "common.hh"
 #include "misc.hh"
 #include "font-manager.hh"
 #include "viewport-manager.hh"
+
+#define MAX_VOICES 256
 
 DebugApuWindow::DebugApuWindow() : m_is_open(false)
 {
@@ -60,8 +63,7 @@ void DebugApuWindow::Draw()
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2*g_viewport_mgr.m_scale, 2*g_viewport_mgr.m_scale));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4*g_viewport_mgr.m_scale, 4*g_viewport_mgr.m_scale));
-    for (int i = 0; i < 256; i++)
-    {
+    for (int i = 0; i < MAX_VOICES; i++) {
         if (i % 16) {
             ImGui::SameLine();
         }
@@ -132,8 +134,15 @@ void DebugApuWindow::Draw()
 
         assert(voice->container_size < 4);
         assert(voice->sample_size < 4);
-        ImGui::Text("Container Size: %s, Sample Size: %s, Samples per Block: %d",
-            cs[voice->container_size], ss[voice->sample_size], voice->samples_per_block);
+        const char *spb_or_bin_label = "Samples per Block";
+        unsigned int spb_or_bin = voice->samples_per_block;
+        if (voice->multipass) {
+            spb_or_bin_label = "Multipass Bin";
+            spb_or_bin = voice->multipass_bin;
+        }
+        ImGui::Text("Container Size: %s, Sample Size: %s, %s: %d",
+                    cs[voice->container_size], ss[voice->sample_size],
+                    spb_or_bin_label, spb_or_bin);
         ImGui::Text("Rate: %f (%d Hz)", voice->rate, (int)(48000.0/voice->rate));
         ImGui::Text("EBO=%d CBO=%d LBO=%d BA=%x",
             voice->ebo, voice->cbo, voice->lbo, voice->ba);
@@ -153,6 +162,30 @@ void DebugApuWindow::Draw()
             }
             ImGui::Text("%-17s", buf);
         }
+
+        int mon = mcpx_apu_debug_get_monitor();
+        if (mon == MCPX_APU_DEBUG_MON_VP) {
+            if (voice->multipass_dst_voice != 0xFFFF) {
+                ImGui::Text("Multipass Dest Voice: 0x%02x",
+                            voice->multipass_dst_voice);
+            }
+            if (voice->multipass) {
+                ImGui::Text("Multipass Src Voices:");
+                int n = 0;
+
+                for (int i = 0; i < MAX_VOICES; i++) {
+                    if (dbg->vp.v[i].multipass_dst_voice == voice_info) {
+                        if (n > 0 && ((n & 7) == 0)) {
+                            ImGui::Text("                     ");
+                        }
+                        ImGui::SameLine();
+                        ImGui::Text("0x%02x", i);
+                        n++;
+                    }
+                }
+            }
+        }
+
         ImGui::PopFont();
         ImGui::EndTooltip();
     }
@@ -168,20 +201,10 @@ void DebugApuWindow::Draw()
 
     ImGui::NextColumn();
 
-    ImGui::PushFont(g_font_mgr.m_fixed_width_font);
-    ImGui::Text("Frames:      %04d", dbg->frames_processed);
-    ImGui::Text("GP Cycles:   %04d", dbg->gp.cycles);
-    ImGui::Text("EP Cycles:   %04d", dbg->ep.cycles);
-    bool color = (dbg->utilization > 0.9);
-    if (color) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,0,0,1));
-    ImGui::Text("Utilization: %.2f%%", (dbg->utilization*100));
-    if (color) ImGui::PopStyleColor();
-    ImGui::PopFont();
-
     static int mon = 0;
-    mon = mcpx_apu_debug_get_monitor();
+    mon = (int)mcpx_apu_debug_get_monitor();
     if (ImGui::Combo("Monitor", &mon, "AC97\0VP Only\0GP Only\0EP Only\0GP/EP if enabled\0")) {
-        mcpx_apu_debug_set_monitor(mon);
+        mcpx_apu_debug_set_monitor((McpxApuDebugMonitorPoint)mon);
     }
 
     static bool gp_realtime;
@@ -196,6 +219,98 @@ void DebugApuWindow::Draw()
         mcpx_apu_debug_set_ep_realtime_enabled(ep_realtime);
     }
 
+    ImGui::Checkbox("HRTF Filtering\n", &g_config.audio.hrtf);
+
+    ImGui::PushFont(g_font_mgr.m_fixed_width_font);
+
+    bool color = (dbg->utilization > 0.9);
+    if (color) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,0,0,1));
+    ImGui::Text("Utilization: %.2f%%", (dbg->utilization*100));
+    if (color) ImGui::PopStyleColor();
+
+    ImGui::Text("Frames:      %04d", dbg->frames_processed);
+    if (ImGui::TreeNode("Throttle")) {
+        ImGui::Text("Deviation: %" PRId64 "/%" PRId64 "/%" PRId64 " us",
+                    dbg->throttle.deviation.min_us,
+                    dbg->throttle.deviation.avg_us,
+                    dbg->throttle.deviation.max_us);
+        ImGui::Text("Latency:   %.1f/%.1f/%.1f ms",
+                    dbg->throttle.latency.min_ms,
+                    dbg->throttle.latency.avg_ms,
+                    dbg->throttle.latency.max_ms);
+        float high = dbg->throttle.latency.high_ms;
+        if (high > 0) {
+            float scale = fmax(high, dbg->throttle.latency.max_ms);
+            float h = ImGui::GetFrameHeight() * 0.25f;
+
+            ImGui::Text("Queue/Pacing:");
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            float w = ImGui::GetContentRegionAvail().x;
+            float low_x = pos.x + w * (dbg->throttle.latency.low_ms / scale);
+            float high_x = pos.x + w * (high / scale);
+            float min_x = pos.x + w * (dbg->throttle.latency.min_ms / scale);
+            float avg_x = pos.x + w * (dbg->throttle.latency.avg_ms / scale);
+            float max_x = pos.x + w * (dbg->throttle.latency.max_ms / scale);
+            const ImU32 col_bg   = IM_COL32(40, 40, 40, 255);
+            const ImU32 col_band = IM_COL32(60, 120, 60, 255);
+            const ImU32 col_avg  = IM_COL32(100, 220, 100, 255);
+            const ImU32 col_low  = IM_COL32(255, 255, 0, 180);
+            const ImU32 col_high = IM_COL32(255, 80, 80, 180);
+
+            ImDrawList *dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(pos, ImVec2(pos.x + w, pos.y + h), col_bg);
+            dl->AddRectFilled(ImVec2(min_x, pos.y), ImVec2(max_x, pos.y + h),
+                              col_band);
+            dl->AddLine(ImVec2(low_x, pos.y), ImVec2(low_x, pos.y + h),
+                        col_low, 1.0f);
+            dl->AddLine(ImVec2(avg_x, pos.y), ImVec2(avg_x, pos.y + h),
+                        col_avg, 2.0f);
+            dl->AddLine(ImVec2(high_x, pos.y), ImVec2(high_x, pos.y + h),
+                        col_high, 1.0f);
+            ImGui::Dummy(ImVec2(w, h));
+
+            pos.y += h * 1.25;
+
+            const ImU32 col_speedup = col_low;
+            const ImU32 col_ok      = col_band;
+            const ImU32 col_backoff = col_high;
+            float sp = dbg->throttle.pacing.speedup;
+            float ok = dbg->throttle.pacing.ok;
+            float bo = dbg->throttle.pacing.backoff;
+            float sp_x = pos.x + w * sp;
+            float ok_x = sp_x + w * ok;
+            dl->AddRectFilled(pos, ImVec2(pos.x + w, pos.y + h), col_bg);
+            if (sp > 0) {
+                dl->AddRectFilled(pos, ImVec2(sp_x, pos.y + h), col_speedup);
+            }
+            if (ok > 0) {
+                dl->AddRectFilled(ImVec2(sp_x, pos.y), ImVec2(ok_x, pos.y + h),
+                                  col_ok);
+            }
+            if (bo > 0) {
+                dl->AddRectFilled(ImVec2(ok_x, pos.y), ImVec2(pos.x + w, pos.y + h),
+                                  col_backoff);
+            }
+            ImGui::Dummy(ImVec2(w, h));
+        }
+        ImGui::TreePop();
+    }
+    ImGui::Text("VP:          %4d us", dbg->vp.total_worker_time_us);
+    if (ImGui::TreeNode("VP Workers")) {
+        ImGui::Text(" W: #  us");
+        ImGui::SameLine();
+        ImGui::Text(" W: #  us");
+        for (int i = 0; i < dbg->vp.num_workers; i++) {
+            if (i % 2) ImGui::SameLine();
+            ImGui::Text("%2d:%2d %3d", i, dbg->vp.workers[i].num_voices,
+                        dbg->vp.workers[i].time_us);
+        }
+        ImGui::TreePop();
+    }
+    ImGui::Text("GP Cycles:   %04d", dbg->gp.cycles);
+    ImGui::Text("EP Cycles:   %04d", dbg->ep.cycles);
+
+    ImGui::PopFont();
     ImGui::Columns(1);
     ImGui::End();
 }

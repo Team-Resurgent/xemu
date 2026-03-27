@@ -30,6 +30,11 @@
  *
  * notes - x-vfio-user-server could block IO and monitor during the
  *         initialization phase.
+ *
+ *         When x-remote machine has the auto-shutdown property
+ *         enabled (default), x-vfio-user-server terminates after the last
+ *         client disconnects. Otherwise, it will continue running until
+ *         explicitly killed.
  */
 
 #include "qemu/osdep.h"
@@ -38,7 +43,7 @@
 #include "qom/object_interfaces.h"
 #include "qemu/error-report.h"
 #include "trace.h"
-#include "sysemu/runstate.h"
+#include "system/runstate.h"
 #include "hw/boards.h"
 #include "hw/remote/machine.h"
 #include "qapi/error.h"
@@ -47,12 +52,12 @@
 #include "qemu/notify.h"
 #include "qemu/thread.h"
 #include "qemu/main-loop.h"
-#include "sysemu/sysemu.h"
+#include "system/system.h"
 #include "libvfio-user.h"
 #include "hw/qdev-core.h"
 #include "hw/pci/pci.h"
 #include "qemu/timer.h"
-#include "exec/memory.h"
+#include "system/memory.h"
 #include "hw/pci/msi.h"
 #include "hw/pci/msix.h"
 #include "hw/remote/vfio-user-obj.h"
@@ -61,18 +66,26 @@
 OBJECT_DECLARE_TYPE(VfuObject, VfuObjectClass, VFU_OBJECT)
 
 /**
- * VFU_OBJECT_ERROR - reports an error message. If auto_shutdown
- * is set, it aborts the machine on error. Otherwise, it logs an
- * error message without aborting.
+ * VFU_OBJECT_ERROR - reports an error message.
+ *
+ * If auto_shutdown is set, it aborts the machine on error. Otherwise,
+ * it logs an error message without aborting. auto_shutdown is disabled
+ * when the server serves clients from multiple VMs; as such, an error
+ * from one VM shouldn't be able to disrupt other VM's services.
  */
 #define VFU_OBJECT_ERROR(o, fmt, ...)                                     \
     {                                                                     \
+        error_report((fmt), ## __VA_ARGS__);                              \
         if (vfu_object_auto_shutdown()) {                                 \
-            error_setg(&error_abort, (fmt), ## __VA_ARGS__);              \
-        } else {                                                          \
-            error_report((fmt), ## __VA_ARGS__);                          \
+            /*                                                            \
+             * FIXME This looks inappropriate.  The error is serious      \
+             * enough programming error to warrant aborting the process   \
+             * when auto-shutdown is enabled, yet harmless enough to      \
+             * permit carrying on when it's disabled.  Makes no sense.    \
+             */                                                           \
+            abort();                                                      \
         }                                                                 \
-    }                                                                     \
+    }
 
 struct VfuObjectClass {
     ObjectClass parent_class;
@@ -273,7 +286,7 @@ static ssize_t vfu_object_cfg_access(vfu_ctx_t *vfu_ctx, char * const buf,
     while (bytes > 0) {
         len = (bytes > pci_access_width) ? pci_access_width : bytes;
         if (is_write) {
-            memcpy(&val, ptr, len);
+            val = ldn_le_p(ptr, len);
             pci_host_config_write_common(o->pci_dev, offset,
                                          pci_config_size(o->pci_dev),
                                          val, len);
@@ -281,7 +294,7 @@ static ssize_t vfu_object_cfg_access(vfu_ctx_t *vfu_ctx, char * const buf,
         } else {
             val = pci_host_config_read_common(o->pci_dev, offset,
                                               pci_config_size(o->pci_dev), len);
-            memcpy(ptr, &val, len);
+            stn_le_p(ptr, len, val);
             trace_vfu_cfg_read(offset, val);
         }
         offset += len;
@@ -350,7 +363,7 @@ static int vfu_object_mr_rw(MemoryRegion *mr, uint8_t *buf, hwaddr offset,
     int access_size;
     uint64_t val;
 
-    if (memory_access_is_direct(mr, is_write)) {
+    if (memory_access_is_direct(mr, is_write, MEMTXATTRS_UNSPECIFIED)) {
         /**
          * Some devices expose a PCI expansion ROM, which could be buffer
          * based as compared to other regions which are primarily based on
@@ -392,7 +405,7 @@ static int vfu_object_mr_rw(MemoryRegion *mr, uint8_t *buf, hwaddr offset,
         }
 
         if (release_lock) {
-            qemu_mutex_unlock_iothread();
+            bql_unlock();
             release_lock = false;
         }
 
@@ -665,8 +678,8 @@ void vfu_object_set_bus_irq(PCIBus *pci_bus)
     int bus_num = pci_bus_num(pci_bus);
     int max_bdf = PCI_BUILD_BDF(bus_num, PCI_DEVFN_MAX - 1);
 
-    pci_bus_irqs(pci_bus, vfu_object_set_irq, vfu_object_map_irq, pci_bus,
-                 max_bdf);
+    pci_bus_irqs(pci_bus, vfu_object_set_irq, pci_bus, max_bdf);
+    pci_bus_map_irqs(pci_bus, vfu_object_map_irq);
 }
 
 static int vfu_object_device_reset(vfu_ctx_t *vfu_ctx, vfu_reset_type_t type)
@@ -678,7 +691,7 @@ static int vfu_object_device_reset(vfu_ctx_t *vfu_ctx, vfu_reset_type_t type)
         return 0;
     }
 
-    qdev_reset_all(DEVICE(o->pci_dev));
+    device_cold_reset(DEVICE(o->pci_dev));
 
     return 0;
 }
@@ -719,7 +732,6 @@ static void vfu_object_machine_done(Notifier *notifier, void *data)
  */
 static void vfu_object_init_ctx(VfuObject *o, Error **errp)
 {
-    ERRP_GUARD();
     DeviceState *dev = NULL;
     vfu_pci_type_t pci_type = VFU_PCI_TYPE_CONVENTIONAL;
     int ret;
@@ -910,7 +922,7 @@ static void vfu_object_finalize(Object *obj)
     }
 }
 
-static void vfu_object_class_init(ObjectClass *klass, void *data)
+static void vfu_object_class_init(ObjectClass *klass, const void *data)
 {
     VfuObjectClass *k = VFU_OBJECT_CLASS(klass);
 
@@ -937,7 +949,7 @@ static const TypeInfo vfu_object_info = {
     .instance_finalize = vfu_object_finalize,
     .class_size = sizeof(VfuObjectClass),
     .class_init = vfu_object_class_init,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
         { TYPE_USER_CREATABLE },
         { }
     }

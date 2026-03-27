@@ -21,7 +21,7 @@
 #include "hw/qdev-properties.h"
 #include "hw/qdev-properties-system.h"
 #include "hw/scsi/emulation.h"
-#include "sysemu/block-backend.h"
+#include "system/block-backend.h"
 #include "trace.h"
 
 #ifdef __linux__
@@ -109,14 +109,11 @@ done:
 static void scsi_command_complete(void *opaque, int ret)
 {
     SCSIGenericReq *r = (SCSIGenericReq *)opaque;
-    SCSIDevice *s = r->req.dev;
 
     assert(r->req.aiocb != NULL);
     r->req.aiocb = NULL;
 
-    aio_context_acquire(blk_get_aio_context(s->conf.blk));
     scsi_command_complete_noio(r, ret);
-    aio_context_release(blk_get_aio_context(s->conf.blk));
 }
 
 static int execute_command(BlockBackend *blk,
@@ -276,11 +273,9 @@ static void scsi_read_complete(void * opaque, int ret)
     assert(r->req.aiocb != NULL);
     r->req.aiocb = NULL;
 
-    aio_context_acquire(blk_get_aio_context(s->conf.blk));
-
     if (ret || r->req.io_canceled) {
         scsi_command_complete_noio(r, ret);
-        goto done;
+        return;
     }
 
     len = r->io_header.dxfer_len - r->io_header.resid;
@@ -319,7 +314,7 @@ static void scsi_read_complete(void * opaque, int ret)
         r->io_header.status != GOOD ||
         len == 0) {
         scsi_command_complete_noio(r, 0);
-        goto done;
+        return;
     }
 
     /* Snoop READ CAPACITY output to set the blocksize.  */
@@ -355,9 +350,6 @@ static void scsi_read_complete(void * opaque, int ret)
 req_complete:
     scsi_req_data(&r->req, len);
     scsi_req_unref(&r->req);
-
-done:
-    aio_context_release(blk_get_aio_context(s->conf.blk));
 }
 
 /* Read more data from scsi device into buffer.  */
@@ -393,11 +385,9 @@ static void scsi_write_complete(void * opaque, int ret)
     assert(r->req.aiocb != NULL);
     r->req.aiocb = NULL;
 
-    aio_context_acquire(blk_get_aio_context(s->conf.blk));
-
     if (ret || r->req.io_canceled) {
         scsi_command_complete_noio(r, ret);
-        goto done;
+        return;
     }
 
     if (r->req.cmd.buf[0] == MODE_SELECT && r->req.cmd.buf[4] == 12 &&
@@ -407,9 +397,6 @@ static void scsi_write_complete(void * opaque, int ret)
     }
 
     scsi_command_complete_noio(r, ret);
-
-done:
-    aio_context_release(blk_get_aio_context(s->conf.blk));
 }
 
 /* Write data to a scsi device.  Returns nonzero on failure.
@@ -765,7 +752,6 @@ static void scsi_generic_realize(SCSIDevice *s, Error **errp)
 
     /* Only used by scsi-block, but initialize it nevertheless to be clean.  */
     s->default_scsi_version = -1;
-    s->io_timeout = DEFAULT_IO_TIMEOUT;
     scsi_generic_read_device_inquiry(s);
 }
 
@@ -786,12 +772,11 @@ static SCSIRequest *scsi_new_request(SCSIDevice *d, uint32_t tag, uint32_t lun,
     return scsi_req_alloc(&scsi_generic_req_ops, d, tag, lun, hba_private);
 }
 
-static Property scsi_generic_properties[] = {
+static const Property scsi_generic_properties[] = {
     DEFINE_PROP_DRIVE("drive", SCSIDevice, conf.blk),
     DEFINE_PROP_BOOL("share-rw", SCSIDevice, conf.share_rw, false),
     DEFINE_PROP_UINT32("io_timeout", SCSIDevice, io_timeout,
                        DEFAULT_IO_TIMEOUT),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static int scsi_generic_parse_cdb(SCSIDevice *dev, SCSICommand *cmd,
@@ -801,7 +786,7 @@ static int scsi_generic_parse_cdb(SCSIDevice *dev, SCSICommand *cmd,
     return scsi_bus_parse_cdb(dev, cmd, buf, buf_len, hba_private);
 }
 
-static void scsi_generic_class_initfn(ObjectClass *klass, void *data)
+static void scsi_generic_class_initfn(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     SCSIDeviceClass *sc = SCSI_DEVICE_CLASS(klass);
@@ -811,7 +796,7 @@ static void scsi_generic_class_initfn(ObjectClass *klass, void *data)
     sc->parse_cdb    = scsi_generic_parse_cdb;
     dc->fw_name = "disk";
     dc->desc = "pass through generic scsi device (/dev/sg*)";
-    dc->reset = scsi_generic_reset;
+    device_class_set_legacy_reset(dc, scsi_generic_reset);
     device_class_set_props(dc, scsi_generic_properties);
     dc->vmsd  = &vmstate_scsi_device;
 }

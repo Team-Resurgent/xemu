@@ -56,7 +56,7 @@ int tap_open(char *ifname, int ifname_size, int *vnet_hdr,
         } else {
             snprintf(dname, sizeof dname, "/dev/tap%d", i);
         }
-        TFR(fd = open(dname, O_RDWR));
+        fd = RETRY_ON_EINTR(open(dname, O_RDWR));
         if (fd >= 0) {
             break;
         }
@@ -98,7 +98,12 @@ int tap_open(char *ifname, int ifname_size, int *vnet_hdr,
             return -1;
         }
     }
-    g_unix_set_fd_nonblocking(fd, true, NULL);
+
+    if (!qemu_set_blocking(fd, false, errp)) {
+        close(fd);
+        return -1;
+    }
+
     return fd;
 }
 
@@ -111,7 +116,7 @@ static int tap_open_clone(char *ifname, int ifname_size, Error **errp)
     int fd, s, ret;
     struct ifreq ifr;
 
-    TFR(fd = open(PATH_NET_TAP, O_RDWR));
+    fd = RETRY_ON_EINTR(open(PATH_NET_TAP, O_RDWR));
     if (fd < 0) {
         error_setg_errno(errp, errno, "could not open %s", PATH_NET_TAP);
         return -1;
@@ -159,7 +164,7 @@ int tap_open(char *ifname, int ifname_size, int *vnet_hdr,
     if (ifname[0] != '\0') {
         char dname[100];
         snprintf(dname, sizeof dname, "/dev/%s", ifname);
-        TFR(fd = open(dname, O_RDWR));
+        fd = RETRY_ON_EINTR(open(dname, O_RDWR));
         if (fd < 0 && errno != ENOENT) {
             error_setg_errno(errp, errno, "could not open %s", dname);
             return -1;
@@ -189,7 +194,10 @@ int tap_open(char *ifname, int ifname_size, int *vnet_hdr,
         goto error;
     }
 
-    g_unix_set_fd_nonblocking(fd, true, NULL);
+    if (!qemu_set_blocking(fd, false, errp)) {
+        goto error;
+    }
+
     return fd;
 
 error:
@@ -212,9 +220,14 @@ int tap_probe_has_ufo(int fd)
     return 0;
 }
 
-int tap_probe_vnet_hdr_len(int fd, int len)
+int tap_probe_has_uso(int fd)
 {
     return 0;
+}
+
+bool tap_probe_has_tunnel(int fd)
+{
+    return false;
 }
 
 void tap_fd_set_vnet_hdr_len(int fd, int len)
@@ -231,8 +244,7 @@ int tap_fd_set_vnet_be(int fd, int is_be)
     return -EINVAL;
 }
 
-void tap_fd_set_offload(int fd, int csum, int tso4,
-                        int tso6, int ecn, int ufo)
+void tap_fd_set_offload(int fd, const NetOffloads *ol)
 {
 }
 

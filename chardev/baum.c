@@ -44,39 +44,39 @@
 
 #define ESC 0x1B
 
-#define BAUM_REQ_DisplayData		0x01
-#define BAUM_REQ_GetVersionNumber	0x05
-#define BAUM_REQ_GetKeys		0x08
-#define BAUM_REQ_SetMode		0x12
-#define BAUM_REQ_SetProtocol		0x15
-#define BAUM_REQ_GetDeviceIdentity	0x84
-#define BAUM_REQ_GetSerialNumber	0x8A
+#define BAUM_REQ_DisplayData            0x01
+#define BAUM_REQ_GetVersionNumber       0x05
+#define BAUM_REQ_GetKeys                0x08
+#define BAUM_REQ_SetMode                0x12
+#define BAUM_REQ_SetProtocol            0x15
+#define BAUM_REQ_GetDeviceIdentity      0x84
+#define BAUM_REQ_GetSerialNumber        0x8A
 
-#define BAUM_RSP_CellCount		0x01
-#define BAUM_RSP_VersionNumber		0x05
-#define BAUM_RSP_ModeSetting		0x11
-#define BAUM_RSP_CommunicationChannel	0x16
-#define BAUM_RSP_PowerdownSignal	0x17
-#define BAUM_RSP_HorizontalSensors	0x20
-#define BAUM_RSP_VerticalSensors	0x21
-#define BAUM_RSP_RoutingKeys		0x22
-#define BAUM_RSP_Switches		0x23
-#define BAUM_RSP_TopKeys		0x24
-#define BAUM_RSP_HorizontalSensor	0x25
-#define BAUM_RSP_VerticalSensor		0x26
-#define BAUM_RSP_RoutingKey		0x27
-#define BAUM_RSP_FrontKeys6		0x28
-#define BAUM_RSP_BackKeys6		0x29
-#define BAUM_RSP_CommandKeys		0x2B
-#define BAUM_RSP_FrontKeys10		0x2C
-#define BAUM_RSP_BackKeys10		0x2D
-#define BAUM_RSP_EntryKeys		0x33
-#define BAUM_RSP_JoyStick		0x34
-#define BAUM_RSP_ErrorCode		0x40
-#define BAUM_RSP_InfoBlock		0x42
-#define BAUM_RSP_DeviceIdentity		0x84
-#define BAUM_RSP_SerialNumber		0x8A
-#define BAUM_RSP_BluetoothName		0x8C
+#define BAUM_RSP_CellCount              0x01
+#define BAUM_RSP_VersionNumber          0x05
+#define BAUM_RSP_ModeSetting            0x11
+#define BAUM_RSP_CommunicationChannel   0x16
+#define BAUM_RSP_PowerdownSignal        0x17
+#define BAUM_RSP_HorizontalSensors      0x20
+#define BAUM_RSP_VerticalSensors        0x21
+#define BAUM_RSP_RoutingKeys            0x22
+#define BAUM_RSP_Switches               0x23
+#define BAUM_RSP_TopKeys                0x24
+#define BAUM_RSP_HorizontalSensor       0x25
+#define BAUM_RSP_VerticalSensor         0x26
+#define BAUM_RSP_RoutingKey             0x27
+#define BAUM_RSP_FrontKeys6             0x28
+#define BAUM_RSP_BackKeys6              0x29
+#define BAUM_RSP_CommandKeys            0x2B
+#define BAUM_RSP_FrontKeys10            0x2C
+#define BAUM_RSP_BackKeys10             0x2D
+#define BAUM_RSP_EntryKeys              0x33
+#define BAUM_RSP_JoyStick               0x34
+#define BAUM_RSP_ErrorCode              0x40
+#define BAUM_RSP_InfoBlock              0x42
+#define BAUM_RSP_DeviceIdentity         0x84
+#define BAUM_RSP_SerialNumber           0x8A
+#define BAUM_RSP_BluetoothName          0x8C
 
 #define BAUM_TL1 0x01
 #define BAUM_TL2 0x02
@@ -94,7 +94,7 @@ struct BaumChardev {
     Chardev parent;
 
     brlapi_handle_t *brlapi;
-    int brlapi_fd;
+    brlapi_fileDescriptor brlapi_fd;
     unsigned int x, y;
     bool deferred_init;
 
@@ -654,7 +654,7 @@ static void baum_chr_open(Chardev *chr,
     baum->brlapi = handle;
 
     baum->brlapi_fd = brlapi__openConnection(handle, NULL, NULL);
-    if (baum->brlapi_fd == -1) {
+    if (baum->brlapi_fd == BRLAPI_INVALID_FILE_DESCRIPTOR) {
         error_setg(errp, "brlapi__openConnection: %s",
                    brlapi_strerror(brlapi_error_location()));
         g_free(handle);
@@ -665,10 +665,14 @@ static void baum_chr_open(Chardev *chr,
 
     baum->cellCount_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, baum_cellCount_timer_cb, baum);
 
+    /*
+     * On Windows, brlapi_fd is a pointer, which is being used here
+     * as an integer, but in practice it seems to work
+     */
     qemu_set_fd_handler(baum->brlapi_fd, baum_chr_read, NULL, baum);
 }
 
-static void char_braille_class_init(ObjectClass *oc, void *data)
+static void char_braille_class_init(ObjectClass *oc, const void *data)
 {
     ChardevClass *cc = CHARDEV_CLASS(oc);
 

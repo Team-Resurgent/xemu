@@ -24,6 +24,7 @@
 #ifndef HW_USB_HCD_XHCI_PCI_H
 #define HW_USB_HCD_XHCI_PCI_H
 
+#include "hw/pci/pci_device.h"
 #include "hw/usb.h"
 #include "hcd-xhci.h"
 
@@ -39,6 +40,7 @@ typedef struct XHCIPciState {
     XHCIState xhci;
     OnOffAuto msi;
     OnOffAuto msix;
+    bool conditional_intr_mapping;
 } XHCIPciState;
 
 #endif

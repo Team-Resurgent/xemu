@@ -2,7 +2,7 @@
  * QEMU Xbox PCI buses implementation
  *
  * Copyright (c) 2012 espes
- * Copyright (c) 2018-2021 Matt Borgerson
+ * Copyright (c) 2018-2025 Matt Borgerson
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -29,15 +29,14 @@
 #include "qemu/range.h"
 #include "hw/xen/xen.h"
 #include "hw/pci-host/pam.h"
-#include "sysemu/sysemu.h"
-#include "hw/i386/ioapic.h"
+#include "system/system.h"
 #include "qapi/visitor.h"
 #include "qemu/error-report.h"
 #include "hw/loader.h"
 #include "qemu/config-file.h"
 #include "hw/pci/pci_bus.h"
 #include "hw/pci/pci_bridge.h"
-#include "exec/address-spaces.h"
+#include "system/address-spaces.h"
 #include "qemu/option.h"
 #include "hw/xbox/acpi_xbox.h"
 #include "hw/xbox/amd_smbus.h"
@@ -184,7 +183,7 @@ void xbox_pci_init(qemu_irq *pic,
     sysbus_realize_and_unref(SYS_BUS_DEVICE(host), &error_fatal);
 
     bridge = pci_create_simple_multifunction(host_bus, PCI_DEVFN(0, 0),
-                                             true, "xbox-pci");
+                                             "xbox-pci");
     bridge_state = XBOX_PCI_DEVICE(bridge);
     bridge_state->ram_memory = ram_memory;
     bridge_state->pci_address_space = pci_memory;
@@ -204,13 +203,14 @@ void xbox_pci_init(qemu_irq *pic,
 
     /* lpc bridge */
     PCIDevice *lpc = pci_create_simple_multifunction(host_bus, PCI_DEVFN(1, 0),
-                                                     true, "xbox-lpc");
+                                                     "xbox-lpc");
     XBOX_LPCState *lpc_state = XBOX_LPC_DEVICE(lpc);
     lpc_state->pic = pic;
     lpc_state->rom_memory = rom_memory;
 
-    pci_bus_irqs(host_bus, xbox_lpc_set_irq, xbox_lpc_map_irq, lpc_state,
+    pci_bus_irqs(host_bus, xbox_lpc_set_irq, lpc_state,
                  XBOX_NUM_INT_IRQS + XBOX_NUM_PIRQS);
+    pci_bus_map_irqs(host_bus, xbox_lpc_map_irq);
 
     qemu_irq *acpi_irq = qemu_allocate_irqs(xbox_lpc_set_acpi_irq,
                                             lpc_state, 2);
@@ -220,7 +220,7 @@ void xbox_pci_init(qemu_irq *pic,
     /* smbus */
     PCIDevice *smbus = pci_create_simple_multifunction(host_bus,
                                                        PCI_DEVFN(1, 1),
-                                                       true, "xbox-smbus");
+                                                       "xbox-smbus");
 
     XBOX_SMBState *smbus_state = XBOX_SMBUS_DEVICE(smbus);
     amd756_smbus_init(&smbus->qdev, &smbus_state->smb, acpi_irq[1]);
@@ -289,7 +289,7 @@ static const VMStateDescription vmstate_xbox_smbus = {
     },
 };
 
-static void xbox_smbus_class_init(ObjectClass *klass, void *data)
+static void xbox_smbus_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -344,6 +344,12 @@ static void xbox_lpc_reset(DeviceState *dev)
 {
     XBOXPCI_DPRINTF("ACTIVATING BOOT ROM\n");
     xbox_lpc_enable_mcpx_rom(PCI_DEVICE(dev), true);
+}
+
+static void xbox_lpc_reset_hold(Object *obj, ResetType type)
+{
+    XBOX_LPCState *s = XBOX_LPC_DEVICE(obj);
+    xbox_lpc_reset(DEVICE(s));
 }
 
 static void xbox_lpc_config_write(PCIDevice *dev,
@@ -425,9 +431,10 @@ static const VMStateDescription vmstate_xbox_lpc = {
     },
 };
 
-static void xbox_lpc_class_init(ObjectClass *klass, void *data)
+static void xbox_lpc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
     AcpiDeviceIfClass *adevc = ACPI_DEVICE_IF_CLASS(klass);
 
@@ -439,9 +446,10 @@ static void xbox_lpc_class_init(ObjectClass *klass, void *data)
     k->revision = 178;
     k->class_id = PCI_CLASS_BRIDGE_ISA;
 
+    rc->phases.hold = xbox_lpc_reset_hold;
+
     dc->desc = "nForce LPC Bridge";
     dc->user_creatable = false;
-    dc->reset = xbox_lpc_reset;
     dc->vmsd = &vmstate_xbox_lpc;
     adevc->send_event = xbox_send_gpe;
 }
@@ -465,7 +473,7 @@ static void xbox_agp_realize(PCIDevice *d, Error **errp)
     pci_bridge_initfn(d, TYPE_PCI_BUS);
 }
 
-static void xbox_agp_class_init(ObjectClass *klass, void *data)
+static void xbox_agp_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -473,14 +481,13 @@ static void xbox_agp_class_init(ObjectClass *klass, void *data)
     k->realize = xbox_agp_realize;
     k->exit = pci_bridge_exitfn;
     k->config_write = pci_bridge_write_config;
-    k->is_bridge = 1;
     k->vendor_id = PCI_VENDOR_ID_NVIDIA;
     k->device_id = PCI_DEVICE_ID_NVIDIA_NFORCE_AGP;
     k->revision = 161;
 
     dc->desc = "nForce AGP to PCI Bridge";
     dc->vmsd = &vmstate_pci_device;
-    dc->reset = pci_bridge_reset;
+    device_class_set_legacy_reset(dc, pci_bridge_reset);
 }
 
 static const TypeInfo xbox_agp_info = {
@@ -507,7 +514,7 @@ static const VMStateDescription pci_bridge_dev_vmstate = {
     }
 };
 
-static void xbox_pci_class_init(ObjectClass *klass, void *data)
+static void xbox_pci_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -542,22 +549,21 @@ static const TypeInfo xbox_pci_info = {
 static void xbox_pcihost_realize(DeviceState *dev, Error **errp)
 {
     PCIHostState *s = PCI_HOST_BRIDGE(dev);
-    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
 
     memory_region_init_io(&s->conf_mem, OBJECT(dev),
                           &pci_host_conf_le_ops, s,
                           "pci-conf-idx", 4);
-    sysbus_add_io(sbd, CONFIG_ADDR, &s->conf_mem);
+    memory_region_add_subregion(get_system_io(), CONFIG_ADDR, &s->conf_mem);
     sysbus_init_ioports(&s->busdev, CONFIG_ADDR, 4);
 
     memory_region_init_io(&s->data_mem, OBJECT(dev),
                           &pci_host_data_le_ops, s,
                           "pci-conf-data", 4);
-    sysbus_add_io(sbd, CONFIG_DATA, &s->data_mem);
+    memory_region_add_subregion(get_system_io(), CONFIG_DATA, &s->data_mem);
     sysbus_init_ioports(&s->busdev, CONFIG_DATA, 4);
 }
 
-static void xbox_pcihost_class_init(ObjectClass *klass, void *data)
+static void xbox_pcihost_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
@@ -574,12 +580,12 @@ static const TypeInfo xbox_pcihost_info = {
 
 static void xboxpci_register_types(void)
 {
-    type_register(&xbox_pcihost_info);
-    type_register(&xbox_pci_info);
-    type_register(&xbox_agp_info);
+    type_register_static(&xbox_pcihost_info);
+    type_register_static(&xbox_pci_info);
+    type_register_static(&xbox_agp_info);
 
-    type_register(&xbox_lpc_info);
-    type_register(&xbox_smbus_info);
+    type_register_static(&xbox_lpc_info);
+    type_register_static(&xbox_smbus_info);
 }
 
 type_init(xboxpci_register_types)

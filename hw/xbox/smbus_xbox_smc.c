@@ -2,7 +2,7 @@
  * QEMU SMBus Xbox System Management Controller
  *
  * Copyright (c) 2011 espes
- * Copyright (c) 2020-2021 Matt Borgerson
+ * Copyright (c) 2020-2025 Matt Borgerson
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -31,12 +31,13 @@
 #include "hw/i2c/smbus_slave.h"
 #include "qemu/config-file.h"
 #include "qapi/error.h"
-#include "sysemu/block-backend.h"
-#include "sysemu/blockdev.h"
-#include "sysemu/sysemu.h"
+#include "system/block-backend.h"
+#include "system/blockdev.h"
+#include "system/system.h"
 #include "smbus.h"
-#include "sysemu/runstate.h"
+#include "system/runstate.h"
 #include "hw/qdev-properties.h"
+#include "block/block_int-io.h"
 
 #define TYPE_XBOX_SMC "smbus-xbox-smc"
 #define XBOX_SMC(obj) OBJECT_CHECK(SMBusSMCDevice, (obj), TYPE_XBOX_SMC)
@@ -291,7 +292,7 @@ static void smbus_smc_realize(DeviceState *dev, Error **errp)
     xbox_smc_update_tray_state();
 }
 
-static void smbus_smc_class_initfn(ObjectClass *klass, void *data)
+static void smbus_smc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     SMBusDeviceClass *sc = SMBUS_DEVICE_CLASS(klass);
@@ -306,7 +307,7 @@ static TypeInfo smbus_smc_info = {
     .name = TYPE_XBOX_SMC,
     .parent = TYPE_SMBUS_DEVICE,
     .instance_size = sizeof(SMBusSMCDevice),
-    .class_init = smbus_smc_class_initfn,
+    .class_init = smbus_smc_class_init,
 };
 
 static void smbus_smc_register_devices(void)

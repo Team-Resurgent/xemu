@@ -15,10 +15,13 @@ error() {
 }
 
 if test $# -lt 1; then
-    error "Usage: $0 <output tarball>"
+    error "Usage: $0 <output tarball> <prefix>"
 fi
 
 tar_file=$(realpath "$1")
+tar_prefix=${2:-./}
+[[ "$tar_prefix" == ./* && "$tar_prefix" == */ ]] || { echo "Invalid prefix (should be ./<prefix>/)"; exit 1; }
+
 sub_tdir=$(mktemp -d "${tar_file%.tar}.sub.XXXXXXXX")
 sub_file="${sub_tdir}/submodule.tar"
 
@@ -26,11 +29,48 @@ sub_file="${sub_tdir}/submodule.tar"
 # independent of what the developer currently has initialized
 # in their checkout, because the build environment is completely
 # different to the host OS.
-submodules="dtc meson ui/keycodemapdb"
-submodules="$submodules tests/fp/berkeley-softfloat-3 tests/fp/berkeley-testfloat-3"
-submodules="$submodules ui/thirdparty/imgui ui/thirdparty/implot ui/thirdparty/httplib util/xxHash tomlplusplus genconfig" # xemu extras
-submodules="$submodules hw/xbox/nv2a/thirdparty/nv2a_vsh_cpu"
+subprojects=(
+  anyhow-1-rs
+  arbitrary-int-1-rs
+  attrs-0.2-rs
+  berkeley-softfloat-3
+  berkeley-testfloat-3
+  bilge-0.2-rs
+  bilge-impl-0.2-rs
+  either-1-rs
+  foreign-0.3-rs
+  glib-sys-0.21-rs
+  itertools-0.11-rs
+  keycodemapdb
+  libc-0.2-rs
+  libvfio-user
+  proc-macro-error-1-rs
+  proc-macro-error-attr-1-rs
+  proc-macro2-1-rs
+  quote-1-rs
+  syn-2-rs
+  unicode-ident-1-rs
+)
 sub_deinit=""
+
+# xemu only
+subprojects=(
+  berkeley-softfloat-3
+  berkeley-testfloat-3
+  genconfig
+  glslang
+  imgui
+  implot
+  json
+  keycodemapdb
+  nv2a_vsh_cpu
+  SPIRV-Reflect
+  tomlplusplus
+  volk
+  VulkanMemoryAllocator
+  xxhash
+  sdl3
+)
 
 function cleanup() {
     local status=$?
@@ -51,33 +91,35 @@ function tree_ish() {
     echo "$retval"
 }
 
-git archive --format tar "$(tree_ish)" > "$tar_file"
+function subproject_dir() {
+    if test ! -f "subprojects/$1.wrap"; then
+      error "scripts/archive-source.sh should only process wrap subprojects"
+    fi
+
+    # Print the directory key of the wrap file, defaulting to the
+    # subproject name.  The wrap file is in ini format and should
+    # have a single section only.  There should be only one section
+    # named "[wrap-*]", which helps keeping the script simple.
+    local dir
+    dir=$(sed -n \
+      -e '/^\[wrap-[a-z][a-z]*\]$/,/^\[/{' \
+      -e    '/^directory *= */!b' \
+      -e    's///p' \
+      -e    'q' \
+      -e '}' \
+      "subprojects/$1.wrap")
+
+    echo "${dir:-$1}"
+}
+
+git archive --format tar "$(tree_ish)" --prefix="$tar_prefix" > "$tar_file"
 test $? -ne 0 && error "failed to archive qemu"
-for sm in $submodules; do
-    status="$(git submodule status "$sm")"
-    smhash="${status#[ +-]}"
-    smhash="${smhash%% *}"
-    case "$status" in
-        -*)
-            sub_deinit="$sub_deinit $sm"
-            git submodule update --init "$sm"
-            test $? -ne 0 && error "failed to update submodule $sm"
-            ;;
-        +*)
-            echo "WARNING: submodule $sm is out of sync"
-            ;;
-    esac
-    (cd "$sm"; git rev-parse HEAD 2>/dev/null >HEAD)
-    (cd $sm; git archive --format tar --prefix "$sm/" $(tree_ish)) > "$sub_file"
-    test $? -ne 0 && error "failed to archive submodule $sm ($smhash)"
-    tar --concatenate --file "$tar_file" "$sub_file"
-    test $? -ne 0 && error "failed append submodule $sm to $tar_file"
-    tar --append --file "$tar_file" "$sm"/HEAD
+
+meson subprojects download -j8 ${subprojects[@]} >/dev/null
+# test $? -ne 0 && error "failed to download subprojects $subprojects"
+
+for sp in "${subprojects[@]}"; do
+    tar --append --file "$tar_file" --exclude=.git --transform "s,^./,$tar_prefix," ./subprojects/"$(subproject_dir $sp)"
+    test $? -ne 0 && error "failed to append subproject $sp to $tar_file"
 done
-
-git rev-parse HEAD 2>/dev/null | tr -d '\n' > XEMU_COMMIT
-git symbolic-ref --short HEAD > XEMU_BRANCH
-git describe --tags --match 'v*' | cut -c 2- | tr -d '\n' > XEMU_VERSION
-tar -r --file "$tar_file" XEMU_COMMIT XEMU_BRANCH XEMU_VERSION
-
 exit 0

@@ -178,7 +178,7 @@ static void wctablet_input_sync(DeviceState *dev)
     }
 }
 
-static QemuInputHandler wctablet_handler = {
+static const QemuInputHandler wctablet_handler = {
     .name  = "QEMU Wacom Pen Tablet",
     .mask  = INPUT_EVENT_MASK_BTN | INPUT_EVENT_MASK_ABS,
     .event = wctablet_input_event,
@@ -342,7 +342,7 @@ static void wctablet_chr_open(Chardev *chr,
                                              &wctablet_handler);
 }
 
-static void wctablet_chr_class_init(ObjectClass *oc, void *data)
+static void wctablet_chr_class_init(ObjectClass *oc, const void *data)
 {
     ChardevClass *cc = CHARDEV_CLASS(oc);
 

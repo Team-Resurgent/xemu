@@ -17,18 +17,21 @@
 #ifdef CONFIG_LINUX_IO_URING
 #include <liburing.h>
 #endif
-#include "qemu/coroutine.h"
+#include "qemu/coroutine-core.h"
 #include "qemu/queue.h"
 #include "qemu/event_notifier.h"
+#include "qemu/lockcnt.h"
 #include "qemu/thread.h"
 #include "qemu/timer.h"
+#include "block/graph-lock.h"
+#include "hw/qdev-core.h"
+
 
 typedef struct BlockAIOCB BlockAIOCB;
 typedef void BlockCompletionFunc(void *opaque, int ret);
 
 typedef struct AIOCBInfo {
     void (*cancel_async)(BlockAIOCB *acb);
-    AioContext *(*get_aio_context)(BlockAIOCB *acb);
     size_t aiocb_size;
 } AIOCBInfo;
 
@@ -51,13 +54,33 @@ typedef void QEMUBHFunc(void *opaque);
 typedef bool AioPollFn(void *opaque);
 typedef void IOHandler(void *opaque);
 
-struct Coroutine;
-struct ThreadPool;
+struct ThreadPoolAio;
 struct LinuxAioState;
-struct LuringState;
+typedef struct LuringState LuringState;
 
 /* Is polling disabled? */
 bool aio_poll_disabled(AioContext *ctx);
+
+#ifdef CONFIG_LINUX_IO_URING
+/*
+ * Each io_uring request must have a unique CqeHandler that processes the cqe.
+ * The lifetime of a CqeHandler must be at least from aio_add_sqe() until
+ * ->cb() invocation.
+ */
+typedef struct CqeHandler CqeHandler;
+struct CqeHandler {
+    /* Called by the AioContext when the request has completed */
+    void (*cb)(CqeHandler *handler);
+
+    /* Used internally, do not access this */
+    QSIMPLEQ_ENTRY(CqeHandler) next;
+
+    /* This field is filled in before ->cb() is called */
+    struct io_uring_cqe cqe;
+};
+
+typedef QSIMPLEQ_HEAD(, CqeHandler) CqeHandlerSimpleQ;
+#endif /* CONFIG_LINUX_IO_URING */
 
 /* Callbacks for file descriptor monitoring implementations */
 typedef struct {
@@ -104,6 +127,78 @@ typedef struct {
      * Returns: true if ->wait() should be called, false otherwise.
      */
     bool (*need_wait)(AioContext *ctx);
+
+    /*
+     * dispatch:
+     * @ctx: the AioContext
+     *
+     * Dispatch any work that is specific to this file descriptor monitoring
+     * implementation. Usually the event loop's generic file descriptor
+     * monitoring, BH, and timer dispatching code is sufficient, but file
+     * descriptor monitoring implementations offering additional functionality
+     * may need to implement this function for custom behavior. Called at a
+     * point in the event loop when it is safe to invoke user-defined
+     * callbacks.
+     *
+     * This function is optional and may be NULL.
+     *
+     * Returns: true if progress was made (see aio_poll()'s return value),
+     * false otherwise.
+     */
+    bool (*dispatch)(AioContext *ctx);
+
+    /*
+     * gsource_prepare:
+     * @ctx: the AioContext
+     *
+     * Prepare for the glib event loop to wait for events instead of the usual
+     * ->wait() call. See glib's GSourceFuncs->prepare().
+     */
+    void (*gsource_prepare)(AioContext *ctx);
+
+    /*
+     * gsource_check:
+     * @ctx: the AioContext
+     *
+     * Called by the glib event loop from glib's GSourceFuncs->check() after
+     * waiting for events.
+     *
+     * Returns: true when ready to be dispatched.
+     */
+    bool (*gsource_check)(AioContext *ctx);
+
+    /*
+     * gsource_dispatch:
+     * @ctx: the AioContext
+     * @ready_list: list for handlers that become ready
+     *
+     * Place ready AioHandlers on ready_list. Called as part of the glib event
+     * loop from glib's GSourceFuncs->dispatch().
+     *
+     * Called with list_lock incremented.
+     */
+    void (*gsource_dispatch)(AioContext *ctx, AioHandlerList *ready_list);
+
+#ifdef CONFIG_LINUX_IO_URING
+    /**
+     * add_sqe: Add an io_uring sqe for submission.
+     * @prep_sqe: invoked with an sqe that should be prepared for submission
+     * @opaque: user-defined argument to @prep_sqe()
+     * @cqe_handler: the unique cqe handler associated with this request
+     *
+     * The caller's @prep_sqe() function is invoked to fill in the details of
+     * the sqe. Do not call io_uring_sqe_set_data() on this sqe.
+     *
+     * The kernel may see the sqe as soon as @prep_sqe() returns or it may take
+     * until the next event loop iteration.
+     *
+     * This function is called from the current AioContext and is not
+     * thread-safe.
+     */
+    void (*add_sqe)(AioContext *ctx,
+                    void (*prep_sqe)(struct io_uring_sqe *sqe, void *opaque),
+                    void *opaque, CqeHandler *cqe_handler);
+#endif /* CONFIG_LINUX_IO_URING */
 } FDMonOps;
 
 /*
@@ -121,11 +216,23 @@ struct BHListSlice {
 
 typedef QSLIST_HEAD(, AioHandler) AioHandlerSList;
 
+typedef struct AioPolledEvent {
+    int64_t ns;        /* current polling time in nanoseconds */
+} AioPolledEvent;
+
 struct AioContext {
     GSource source;
 
     /* Used by AioContext users to protect from multi-threaded access.  */
     QemuRecMutex lock;
+
+    /*
+     * Keep track of readers and writers of the block layer graph.
+     * This is essential to avoid performing additions and removal
+     * of nodes and edges from block graph while some
+     * other thread is traversing it.
+     */
+    BdrvGraphRWlock *bdrv_graph;
 
     /* The list of registered AIO handlers.  Protected by ctx->list_lock. */
     AioHandlerList aio_handlers;
@@ -197,39 +304,30 @@ struct AioContext {
     /* Thread pool for performing work and receiving completion callbacks.
      * Has its own locking.
      */
-    struct ThreadPool *thread_pool;
+    struct ThreadPoolAio *thread_pool;
 
 #ifdef CONFIG_LINUX_AIO
-    /*
-     * State for native Linux AIO.  Uses aio_context_acquire/release for
-     * locking.
-     */
     struct LinuxAioState *linux_aio;
 #endif
 #ifdef CONFIG_LINUX_IO_URING
-    /*
-     * State for Linux io_uring.  Uses aio_context_acquire/release for
-     * locking.
-     */
-    struct LuringState *linux_io_uring;
-
     /* State for file descriptor monitoring using Linux io_uring */
     struct io_uring fdmon_io_uring;
     AioHandlerSList submit_list;
-#endif
+    void *io_uring_fd_tag;
+
+    /* Pending callback state for cqe handlers */
+    CqeHandlerSimpleQ cqe_handler_ready_list;
+#endif /* CONFIG_LINUX_IO_URING */
 
     /* TimerLists for calling timers - one per clock type.  Has its own
      * locking.
      */
     QEMUTimerListGroup tlg;
 
-    int external_disable_cnt;
-
     /* Number of AioHandlers without .io_poll() */
     int poll_disable_cnt;
 
     /* Polling mode parameters */
-    int64_t poll_ns;        /* current polling time in nanoseconds */
     int64_t poll_max_ns;    /* maximum polling time in nanoseconds */
     int64_t poll_grow;      /* polling time growth factor */
     int64_t poll_shrink;    /* polling time shrink factor */
@@ -251,7 +349,13 @@ struct AioContext {
     /* epoll(7) state used when built with CONFIG_EPOLL */
     int epollfd;
 
+    /* The GSource unix fd tag for epollfd */
+    void *epollfd_tag;
+
     const FDMonOps *fdmon_ops;
+
+    /* Was aio_context_new() successful? */
+    bool initialized;
 };
 
 /**
@@ -278,23 +382,6 @@ void aio_context_ref(AioContext *ctx);
  * Drop a reference to an AioContext.
  */
 void aio_context_unref(AioContext *ctx);
-
-/* Take ownership of the AioContext.  If the AioContext will be shared between
- * threads, and a thread does not want to be interrupted, it will have to
- * take ownership around calls to aio_poll().  Otherwise, aio_poll()
- * automatically takes care of calling aio_context_acquire and
- * aio_context_release.
- *
- * Note that this is separate from bdrv_drained_begin/bdrv_drained_end.  A
- * thread still has to call those to avoid being interrupted by the guest.
- *
- * Bottom halves, timers and callbacks can be created or removed without
- * acquiring the AioContext.
- */
-void aio_context_acquire(AioContext *ctx);
-
-/* Relinquish ownership of the AioContext. */
-void aio_context_release(AioContext *ctx);
 
 /**
  * aio_bh_schedule_oneshot_full: Allocate a new bottom half structure that will
@@ -323,9 +410,11 @@ void aio_bh_schedule_oneshot_full(AioContext *ctx, QEMUBHFunc *cb, void *opaque,
  * is opaque and must be allocated prior to its use.
  *
  * @name: A human-readable identifier for debugging purposes.
+ * @reentrancy_guard: A guard set when entering a cb to prevent
+ * device-reentrancy issues
  */
 QEMUBH *aio_bh_new_full(AioContext *ctx, QEMUBHFunc *cb, void *opaque,
-                        const char *name);
+                        const char *name, MemReentrancyGuard *reentrancy_guard);
 
 /**
  * aio_bh_new: Allocate a new bottom half structure
@@ -334,7 +423,17 @@ QEMUBH *aio_bh_new_full(AioContext *ctx, QEMUBHFunc *cb, void *opaque,
  * string.
  */
 #define aio_bh_new(ctx, cb, opaque) \
-    aio_bh_new_full((ctx), (cb), (opaque), (stringify(cb)))
+    aio_bh_new_full((ctx), (cb), (opaque), (stringify(cb)), NULL)
+
+/**
+ * aio_bh_new_guarded: Allocate a new bottom half structure with a
+ * reentrancy_guard
+ *
+ * A convenience wrapper for aio_bh_new_full() that uses the cb as the name
+ * string.
+ */
+#define aio_bh_new_guarded(ctx, cb, opaque, guard) \
+    aio_bh_new_full((ctx), (cb), (opaque), (stringify(cb)), guard)
 
 /**
  * aio_notify: Force processing of pending events.
@@ -456,7 +555,7 @@ void aio_dispatch(AioContext *ctx);
  * or more AIO events have completed, to ensure something has moved
  * before returning.
  */
-bool aio_poll(AioContext *ctx, bool blocking);
+bool no_coroutine_fn aio_poll(AioContext *ctx, bool blocking);
 
 /* Register a file descriptor and associated callbacks.  Behaves very similarly
  * to qemu_set_fd_handler.  Unlike qemu_set_fd_handler, these callbacks will
@@ -467,20 +566,11 @@ bool aio_poll(AioContext *ctx, bool blocking);
  */
 void aio_set_fd_handler(AioContext *ctx,
                         int fd,
-                        bool is_external,
                         IOHandler *io_read,
                         IOHandler *io_write,
                         AioPollFn *io_poll,
                         IOHandler *io_poll_ready,
                         void *opaque);
-
-/* Set polling begin/end callbacks for a file descriptor that has already been
- * registered with aio_set_fd_handler.  Do nothing if the file descriptor is
- * not registered.
- */
-void aio_set_fd_poll(AioContext *ctx, int fd,
-                     IOHandler *io_poll_begin,
-                     IOHandler *io_poll_end);
 
 /* Register an event notifier and associated callbacks.  Behaves very similarly
  * to event_notifier_set_handler.  Unlike event_notifier_set_handler, these callbacks
@@ -491,14 +581,18 @@ void aio_set_fd_poll(AioContext *ctx, int fd,
  */
 void aio_set_event_notifier(AioContext *ctx,
                             EventNotifier *notifier,
-                            bool is_external,
                             EventNotifierHandler *io_read,
                             AioPollFn *io_poll,
                             EventNotifierHandler *io_poll_ready);
 
-/* Set polling begin/end callbacks for an event notifier that has already been
+/*
+ * Set polling begin/end callbacks for an event notifier that has already been
  * registered with aio_set_event_notifier.  Do nothing if the event notifier is
  * not registered.
+ *
+ * Note that if the io_poll_end() callback (or the entire notifier) is removed
+ * during polling, it will not be called, so an io_poll_begin() is not
+ * necessarily always followed by an io_poll_end().
  */
 void aio_set_event_notifier_poll(AioContext *ctx,
                                  EventNotifier *notifier,
@@ -510,8 +604,8 @@ void aio_set_event_notifier_poll(AioContext *ctx,
  */
 GSource *aio_get_g_source(AioContext *ctx);
 
-/* Return the ThreadPool bound to this AioContext */
-struct ThreadPool *aio_get_thread_pool(AioContext *ctx);
+/* Return the ThreadPoolAio bound to this AioContext */
+struct ThreadPoolAio *aio_get_thread_pool(AioContext *ctx);
 
 /* Setup the LinuxAioState bound to this AioContext */
 struct LinuxAioState *aio_setup_linux_aio(AioContext *ctx, Error **errp);
@@ -519,11 +613,6 @@ struct LinuxAioState *aio_setup_linux_aio(AioContext *ctx, Error **errp);
 /* Return the LinuxAioState bound to this AioContext */
 struct LinuxAioState *aio_get_linux_aio(AioContext *ctx);
 
-/* Setup the LuringState bound to this AioContext */
-struct LuringState *aio_setup_linux_io_uring(AioContext *ctx, Error **errp);
-
-/* Return the LuringState bound to this AioContext */
-struct LuringState *aio_get_linux_io_uring(AioContext *ctx);
 /**
  * aio_timer_new_with_attrs:
  * @ctx: the aio context
@@ -621,59 +710,6 @@ static inline void aio_timer_init(AioContext *ctx,
 int64_t aio_compute_timeout(AioContext *ctx);
 
 /**
- * aio_disable_external:
- * @ctx: the aio context
- *
- * Disable the further processing of external clients.
- */
-static inline void aio_disable_external(AioContext *ctx)
-{
-    qatomic_inc(&ctx->external_disable_cnt);
-}
-
-/**
- * aio_enable_external:
- * @ctx: the aio context
- *
- * Enable the processing of external clients.
- */
-static inline void aio_enable_external(AioContext *ctx)
-{
-    int old;
-
-    old = qatomic_fetch_dec(&ctx->external_disable_cnt);
-    assert(old > 0);
-    if (old == 1) {
-        /* Kick event loop so it re-arms file descriptors */
-        aio_notify(ctx);
-    }
-}
-
-/**
- * aio_external_disabled:
- * @ctx: the aio context
- *
- * Return true if the external clients are disabled.
- */
-static inline bool aio_external_disabled(AioContext *ctx)
-{
-    return qatomic_read(&ctx->external_disable_cnt);
-}
-
-/**
- * aio_node_check:
- * @ctx: the aio context
- * @is_external: Whether or not the checked node is an external event source.
- *
- * Check if the node's is_external flag is okay to be polled by the ctx at this
- * moment. True means green light.
- */
-static inline bool aio_node_check(AioContext *ctx, bool is_external)
-{
-    return !is_external || !qatomic_read(&ctx->external_disable_cnt);
-}
-
-/**
  * aio_co_schedule:
  * @ctx: the aio context
  * @co: the coroutine
@@ -685,7 +721,7 @@ static inline bool aio_node_check(AioContext *ctx, bool is_external)
  * is the context in which the coroutine is running (i.e. the value of
  * qemu_get_current_aio_context() from the coroutine itself).
  */
-void aio_co_schedule(AioContext *ctx, struct Coroutine *co);
+void aio_co_schedule(AioContext *ctx, Coroutine *co);
 
 /**
  * aio_co_reschedule_self:
@@ -693,6 +729,9 @@ void aio_co_schedule(AioContext *ctx, struct Coroutine *co);
  *
  * Move the currently running coroutine to new_ctx. If the coroutine is already
  * running in new_ctx, do nothing.
+ *
+ * Note that this function cannot reschedule from iohandler_ctx to
+ * qemu_aio_context.
  */
 void coroutine_fn aio_co_reschedule_self(AioContext *new_ctx);
 
@@ -707,8 +746,23 @@ void coroutine_fn aio_co_reschedule_self(AioContext *new_ctx);
  * aio_co_wake may be executed either in coroutine or non-coroutine
  * context.  The coroutine must not be entered by anyone else while
  * aio_co_wake() is active.
+ *
+ * If `co`'s AioContext differs from the current AioContext, this will call
+ * aio_co_schedule(), which makes this safe to use even when `co` has not
+ * yielded yet.  In such a case, it will be entered once it yields.
+ *
+ * In contrast, if `co`'s AioContext is equal to the current one, it is
+ * required for `co` to currently be yielding.  This is generally the case
+ * if the caller is not in `co` (i.e. invoked by `co`), because the only
+ * other way for the caller to be running then is for `co` to currently be
+ * yielding.
+ *
+ * Therefore, if there is no way for the caller to be invoked/entered by
+ * `co`, it is generally safe to call this regardless of whether `co` is
+ * known to already be yielding or not -- it only has to yield at some
+ * point.
  */
-void aio_co_wake(struct Coroutine *co);
+void aio_co_wake(Coroutine *co);
 
 /**
  * aio_co_enter:
@@ -717,7 +771,7 @@ void aio_co_wake(struct Coroutine *co);
  *
  * Enter a coroutine in the specified AioContext.
  */
-void aio_co_enter(AioContext *ctx, struct Coroutine *co);
+void aio_co_enter(AioContext *ctx, Coroutine *co);
 
 /**
  * Return the AioContext whose event loop runs in the current thread.
@@ -725,6 +779,9 @@ void aio_co_enter(AioContext *ctx, struct Coroutine *co);
  * If called from an IOThread this will be the IOThread's AioContext.  If
  * called from the main thread or with the "big QEMU lock" taken it
  * will be the main loop AioContext.
+ *
+ * Note that the return value is never the main loop's iohandler_ctx and the
+ * return value is the main loop AioContext instead.
  */
 AioContext *qemu_get_current_aio_context(void);
 
@@ -733,10 +790,13 @@ void qemu_set_current_aio_context(AioContext *ctx);
 /**
  * aio_context_setup:
  * @ctx: the aio context
+ * @errp: error pointer
  *
  * Initialize the aio context.
+ *
+ * Returns: true on success, false otherwise
  */
-void aio_context_setup(AioContext *ctx);
+bool aio_context_setup(AioContext *ctx, Error **errp);
 
 /**
  * aio_context_destroy:
@@ -745,9 +805,6 @@ void aio_context_setup(AioContext *ctx);
  * Destroy the aio context.
  */
 void aio_context_destroy(AioContext *ctx);
-
-/* Used internally, do not call outside AioContext code */
-void aio_context_use_g_source(AioContext *ctx);
 
 /**
  * aio_context_set_poll_params:
@@ -768,8 +825,7 @@ void aio_context_set_poll_params(AioContext *ctx, int64_t max_ns,
  * @max_batch: maximum number of requests in a batch, 0 means that the
  *             engine will use its default
  */
-void aio_context_set_aio_params(AioContext *ctx, int64_t max_batch,
-                                Error **errp);
+void aio_context_set_aio_params(AioContext *ctx, int64_t max_batch);
 
 /**
  * aio_context_set_thread_pool_params:
@@ -779,4 +835,40 @@ void aio_context_set_aio_params(AioContext *ctx, int64_t max_batch,
  */
 void aio_context_set_thread_pool_params(AioContext *ctx, int64_t min,
                                         int64_t max, Error **errp);
+
+#ifdef CONFIG_LINUX_IO_URING
+/**
+ * aio_has_io_uring: Return whether io_uring is available.
+ *
+ * io_uring is either available in all AioContexts or in none, so this only
+ * needs to be called once from within any thread's AioContext.
+ */
+static inline bool aio_has_io_uring(void)
+{
+    AioContext *ctx = qemu_get_current_aio_context();
+    return ctx->fdmon_ops->add_sqe;
+}
+
+/**
+ * aio_add_sqe: Add an io_uring sqe for submission.
+ * @prep_sqe: invoked with an sqe that should be prepared for submission
+ * @opaque: user-defined argument to @prep_sqe()
+ * @cqe_handler: the unique cqe handler associated with this request
+ *
+ * The caller's @prep_sqe() function is invoked to fill in the details of the
+ * sqe. Do not call io_uring_sqe_set_data() on this sqe.
+ *
+ * The sqe is submitted by the current AioContext. The kernel may see the sqe
+ * as soon as @prep_sqe() returns or it may take until the next event loop
+ * iteration.
+ *
+ * When the AioContext is destroyed, pending sqes are ignored and their
+ * CqeHandlers are not invoked.
+ *
+ * This function must be called only when aio_has_io_uring() returns true.
+ */
+void aio_add_sqe(void (*prep_sqe)(struct io_uring_sqe *sqe, void *opaque),
+                 void *opaque, CqeHandler *cqe_handler);
+#endif /* CONFIG_LINUX_IO_URING */
+
 #endif

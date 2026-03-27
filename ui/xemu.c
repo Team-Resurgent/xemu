@@ -1396,19 +1396,16 @@ void xemu_eject_disc(Error **errp)
 static const char *xemu_disc_blockdrv_for_path(const char *path)
 {
     size_t len;
-
-    if (!path) {
-        return "raw";
-    }
-    len = strlen(path);
-    if (len >= 4) {
-        const char *s = path + len - 4;
-
-        if (g_ascii_strcasecmp(s, ".cci") == 0) {
-            return "cci";
-        } else if (g_ascii_strcasecmp(s, ".chd") == 0) {
-            return "chd";
-        }}
+    if (path) {
+        len = strlen(path);
+        if (len >= 4) {
+            const char *s = path + len - 4;
+            if (g_ascii_strcasecmp(s, ".cci") == 0) {
+                return "cci";
+            } else if (g_ascii_strcasecmp(s, ".chd") == 0) {
+                return "chd";
+            }}
+        }
     }
     return "raw";
 }

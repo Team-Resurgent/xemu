@@ -10,16 +10,15 @@ import os.path
 from tarfile import TarFile
 import subprocess
 
-# MIRROR = 'http://packages.macports.org/macports/packages'
-MIRROR = 'http://nue.de.packages.macports.org/macports/packages'
+MIRROR = 'https://packages.macports.org'
 
 # FIXME: Inline macports key
 # FIXME: Move packages to archive directory to track used vs unused
 # FIXME: Support multiple mirrors
 
 class LibInstaller:
-	DARWIN_TARGET_X64="darwin_17" # macOS 10.13
-	DARWIN_TARGET_ARM64="darwin_20" # macOS 11.x
+	DARWIN_TARGET_X64="darwin_21" # macOS 11
+	DARWIN_TARGET_ARM64="darwin_23" # macOS 14.x
 
 	def __init__(self, arch):
 		self._queue = []
@@ -43,7 +42,11 @@ class LibInstaller:
 	def get_latest_pkg_filename_url(self, pkg_name):
 		pkg_base_url = f'{MIRROR}/{pkg_name}'
 		pkg_list = urlopen(pkg_base_url).read().decode('utf-8')
-		pkgs = re.findall(pkg_name + r'[\w\.\-\_\+]*?\.' + self._darwin_target + r'\.' + self._arch + r'\.tbz2', pkg_list)
+		pkgs = re.findall(pkg_name + r'[\w\.\-\_\+]*?\.(?:any_any|darwin_any|' + self._darwin_target + r')\.(?:noarch|' + self._arch + r')\.tbz2', pkg_list)
+		if len(pkgs) < 1:
+			print(f'    [*] [ERROR] Unable to find version of {pkg_name} compatible with {self._darwin_target}.{self._arch}')
+			exit(1)
+
 		pkg_filename = pkgs[-1]
 		return pkg_filename, f'{pkg_base_url}/{pkg_filename}'
 
@@ -88,7 +91,7 @@ class LibInstaller:
 	                            shell=True, check=True)
 
 	def is_pkg_skipped(self, pkg_name):
-		return any(pkg_name.startswith(n) for n in ('python', 'ncurses'))
+		return any(pkg_name.startswith(n) for n in ('python', 'ncurses', 'mesa', 'llvm', 'libsndfile'))
 
 	def install_pkg(self, pkg_name):
 		if self.is_pkg_installed(pkg_name):
@@ -146,7 +149,9 @@ class LibInstaller:
 						if pkg_name.startswith('openssl'): # FIXME
 							new_prefix = f'prefix={self._extract_path}/opt/local/libexec/openssl11\n'
 						lines[i] = new_prefix
-						break
+					elif l.strip().startswith('Requires.private:'):
+						if pkg_name.startswith('libepoxy'):
+							lines[i] = ''
 				with open(extracted_path, 'w') as f:
 					f.write(''.join(lines))
 
@@ -176,14 +181,14 @@ def main():
 	args = ap.parse_args()
 	li = LibInstaller(args.arch)
 	li.install_pkgs([
-		'libsdl2',
+		'SDL3',
 		'glib2',
 		'libsamplerate',
 		'libpixman',
 		'libepoxy',
-		'openssl11',
 		'libpcap',
-		'libslirp'])
+		'libslirp',
+		'libusb'])
 
 if __name__ == '__main__':
 	main()

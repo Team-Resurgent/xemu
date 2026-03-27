@@ -349,17 +349,17 @@ static const VMStateDescription vmstate_zynqmp_pmu_ipi = {
     .name = TYPE_XLNX_ZYNQMP_IPI,
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, XlnxZynqMPIPI, R_XLNX_ZYNQMP_IPI_MAX),
         VMSTATE_END_OF_LIST(),
     }
 };
 
-static void xlnx_zynqmp_ipi_class_init(ObjectClass *klass, void *data)
+static void xlnx_zynqmp_ipi_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = xlnx_zynqmp_ipi_reset;
+    device_class_set_legacy_reset(dc, xlnx_zynqmp_ipi_reset);
     dc->realize = xlnx_zynqmp_ipi_realize;
     dc->vmsd = &vmstate_zynqmp_pmu_ipi;
 }

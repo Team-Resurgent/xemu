@@ -27,8 +27,8 @@ typedef struct {
 } TargetPageBits;
 
 #ifdef IN_PAGE_VARY
-extern bool set_preferred_target_page_bits_common(int bits);
-extern void finalize_target_page_bits_common(int min);
+bool set_preferred_target_page_bits_common(int bits);
+void finalize_target_page_bits_common(int min);
 #endif
 
 /**
@@ -48,5 +48,14 @@ bool set_preferred_target_page_bits(int bits);
  * Commit the final value set by set_preferred_target_page_bits.
  */
 void finalize_target_page_bits(void);
+
+/**
+ * migration_legacy_page_bits
+ *
+ * For migration compatibility with qemu v2.9, prior to the introduction
+ * of the configuration/target-page-bits section, return the value of
+ * TARGET_PAGE_BITS that the target had then.
+ */
+int migration_legacy_page_bits(void);
 
 #endif /* EXEC_PAGE_VARY_H */

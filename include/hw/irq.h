@@ -1,9 +1,20 @@
 #ifndef QEMU_IRQ_H
 #define QEMU_IRQ_H
 
+#include "qom/object.h"
+
 /* Generic IRQ/GPIO pin infrastructure.  */
 
 #define TYPE_IRQ "irq"
+OBJECT_DECLARE_SIMPLE_TYPE(IRQState, IRQ)
+
+struct IRQState {
+    Object parent_obj;
+
+    qemu_irq_handler handler;
+    void *opaque;
+    int n;
+};
 
 void qemu_set_irq(qemu_irq irq, int level);
 
@@ -22,6 +33,45 @@ static inline void qemu_irq_pulse(qemu_irq irq)
     qemu_set_irq(irq, 1);
     qemu_set_irq(irq, 0);
 }
+
+/*
+ * Init a single IRQ. The irq is assigned with a handler, an opaque data
+ * and the interrupt number. The caller must free this with qemu_free_irq().
+ * If you are using this inside a device's init or realize method, then
+ * qemu_init_irq_child() is probably a better choice to avoid the need
+ * to manually clean up the IRQ.
+ */
+void qemu_init_irq(IRQState *irq, qemu_irq_handler handler, void *opaque,
+                   int n);
+
+/**
+ * qemu_init_irq_child: Initialize IRQ and make it a QOM child
+ * @parent: QOM object which owns this IRQ
+ * @propname: child property name
+ * @irq: pointer to IRQState to initialize
+ * @handler: handler function for incoming interrupts
+ * @opaque: opaque data to pass to @handler
+ * @n: interrupt number to pass to @handler
+ *
+ * Init a single IRQ and make the IRQ object a child of @parent with
+ * the child-property name @propname. The IRQ object will thus be
+ * automatically freed when @parent is destroyed.
+ */
+void qemu_init_irq_child(Object *parent, const char *propname,
+                         IRQState *irq, qemu_irq_handler handler,
+                         void *opaque, int n);
+
+
+/**
+ * qemu_init_irqs: Initialize an array of IRQs.
+ *
+ * @irq: Array of IRQs to initialize
+ * @count: number of IRQs to initialize
+ * @handler: handler to assign to each IRQ
+ * @opaque: opaque data to pass to @handler
+ */
+void qemu_init_irqs(IRQState irq[], size_t count,
+                    qemu_irq_handler handler, void *opaque);
 
 /* Returns an array of N IRQs. Each IRQ is assigned the argument handler and
  * opaque data.

@@ -250,7 +250,7 @@ static const VMStateDescription vmstate_stellaris_gptm = {
     .name = "stellaris_gptm",
     .version_id = 2,
     .minimum_version_id = 2,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(config, gptm_state),
         VMSTATE_UINT32_ARRAY(mode, gptm_state, 2),
         VMSTATE_UINT32(control, gptm_state),
@@ -308,7 +308,7 @@ static void stellaris_gptm_realize(DeviceState *dev, Error **errp)
     s->timer[1] = timer_new_ns(QEMU_CLOCK_VIRTUAL, gptm_tick, &s->opaque[1]);
 }
 
-static void stellaris_gptm_class_init(ObjectClass *klass, void *data)
+static void stellaris_gptm_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 

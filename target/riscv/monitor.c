@@ -23,6 +23,7 @@
 #include "cpu_bits.h"
 #include "monitor/monitor.h"
 #include "monitor/hmp-target.h"
+#include "system/memory.h"
 
 #ifdef TARGET_RISCV64
 #define PTE_HEADER_FIELDS       "vaddr            paddr            "\
@@ -55,7 +56,7 @@ static void print_pte_header(Monitor *mon)
 static void print_pte(Monitor *mon, int va_bits, target_ulong vaddr,
                       hwaddr paddr, target_ulong size, int attr)
 {
-    /* santity check on vaddr */
+    /* sanity check on vaddr */
     if (vaddr >= (1UL << va_bits)) {
         return;
     }
@@ -64,7 +65,7 @@ static void print_pte(Monitor *mon, int va_bits, target_ulong vaddr,
         return;
     }
 
-    monitor_printf(mon, TARGET_FMT_lx " " TARGET_FMT_plx " " TARGET_FMT_lx
+    monitor_printf(mon, TARGET_FMT_lx " " HWADDR_FMT_plx " " TARGET_FMT_lx
                    " %c%c%c%c%c%c%c\n",
                    addr_canonical(va_bits, vaddr),
                    paddr, size,
@@ -77,11 +78,13 @@ static void print_pte(Monitor *mon, int va_bits, target_ulong vaddr,
                    attr & PTE_D ? 'd' : '-');
 }
 
-static void walk_pte(Monitor *mon, hwaddr base, target_ulong start,
+static void walk_pte(Monitor *mon, AddressSpace *as,
+                     hwaddr base, target_ulong start,
                      int level, int ptidxbits, int ptesize, int va_bits,
                      target_ulong *vbase, hwaddr *pbase, hwaddr *last_paddr,
                      target_ulong *last_size, int *last_attr)
 {
+    const MemTxAttrs attrs = MEMTXATTRS_UNSPECIFIED;
     hwaddr pte_addr;
     hwaddr paddr;
     target_ulong last_start = -1;
@@ -100,7 +103,7 @@ static void walk_pte(Monitor *mon, hwaddr base, target_ulong start,
 
     for (idx = 0; idx < (1UL << ptidxbits); idx++) {
         pte_addr = base + idx * ptesize;
-        cpu_physical_memory_read(pte_addr, &pte, ptesize);
+        address_space_read(as, pte_addr, attrs, &pte, ptesize);
 
         paddr = (hwaddr)(pte >> PTE_PPN_SHIFT) << PGSHIFT;
         attr = pte & 0xff;
@@ -132,7 +135,7 @@ static void walk_pte(Monitor *mon, hwaddr base, target_ulong start,
                 *last_size = pgsize;
             } else {
                 /* pointer to the next level of the page table */
-                walk_pte(mon, paddr, start, level - 1, ptidxbits, ptesize,
+                walk_pte(mon, as, paddr, start, level - 1, ptidxbits, ptesize,
                          va_bits, vbase, pbase, last_paddr,
                          last_size, last_attr);
             }
@@ -145,6 +148,7 @@ static void walk_pte(Monitor *mon, hwaddr base, target_ulong start,
 
 static void mem_info_svxx(Monitor *mon, CPUArchState *env)
 {
+    AddressSpace *as = env_cpu(env)->as;
     int levels, ptidxbits, ptesize, vm, va_bits;
     hwaddr base;
     target_ulong vbase;
@@ -184,7 +188,6 @@ static void mem_info_svxx(Monitor *mon, CPUArchState *env)
         break;
     default:
         g_assert_not_reached();
-        break;
     }
 
     /* calculate virtual address bits */
@@ -200,7 +203,7 @@ static void mem_info_svxx(Monitor *mon, CPUArchState *env)
     last_attr = 0;
 
     /* walk page tables, starting from address 0 */
-    walk_pte(mon, base, 0, levels - 1, ptidxbits, ptesize, va_bits,
+    walk_pte(mon, as, base, 0, levels - 1, ptidxbits, ptesize, va_bits,
              &vbase, &pbase, &last_paddr, &last_size, &last_attr);
 
     /* don't forget the last one */
@@ -218,7 +221,7 @@ void hmp_info_mem(Monitor *mon, const QDict *qdict)
         return;
     }
 
-    if (!riscv_feature(env, RISCV_FEATURE_MMU)) {
+    if (!riscv_cpu_cfg(env)->mmu) {
         monitor_printf(mon, "S-mode MMU unavailable\n");
         return;
     }

@@ -78,6 +78,8 @@ struct MicrovmMachineClass {
     X86MachineClass parent;
     HotplugHandler *(*orig_hotplug_handler)(MachineState *machine,
                                            DeviceState *dev);
+    void (*x86_load_linux)(X86MachineState *x86ms, FWCfgState *fw_cfg,
+                        int acpi_data_size, bool pvh_enabled);
 };
 
 struct MicrovmMachineState {
@@ -100,8 +102,6 @@ struct MicrovmMachineState {
     Notifier powerdown_req;
     struct GPEXConfig gpex;
 
-    /* device tree */
-    void *fdt;
     uint32_t ioapic_phandle[2];
 };
 

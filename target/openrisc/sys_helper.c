@@ -20,26 +20,48 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
-#include "exec/exec-all.h"
+#include "exec/cputlb.h"
+#include "exec/target_page.h"
 #include "exec/helper-proto.h"
 #include "exception.h"
 #ifndef CONFIG_USER_ONLY
 #include "hw/boards.h"
 #endif
+#include "tcg/insn-start-words.h"
 
 #define TO_SPR(group, number) (((group) << 11) + (number))
 
-void HELPER(mtspr)(CPUOpenRISCState *env, target_ulong spr, target_ulong rb)
+static inline bool is_user(CPUOpenRISCState *env)
 {
-#ifndef CONFIG_USER_ONLY
+#ifdef CONFIG_USER_ONLY
+    return true;
+#else
+    return (env->sr & SR_SM) == 0;
+#endif
+}
+
+void HELPER(mtspr)(CPUOpenRISCState *env, uint32_t spr, uint32_t rb)
+{
     OpenRISCCPU *cpu = env_archcpu(env);
+#ifndef CONFIG_USER_ONLY
     CPUState *cs = env_cpu(env);
-    target_ulong mr;
+    uint32_t mr;
     int idx;
 #endif
 
+    /* Handle user accessible SPRs first.  */
     switch (spr) {
+    case TO_SPR(0, 20): /* FPCSR */
+        cpu_set_fpcsr(env, rb);
+        return;
+    }
+
+    if (is_user(env)) {
+        raise_exception(cpu, EXCP_ILLEGAL);
+    }
+
 #ifndef CONFIG_USER_ONLY
+    switch (spr) {
     case TO_SPR(0, 11): /* EVBAR */
         env->evbar = rb;
         break;
@@ -139,20 +161,20 @@ void HELPER(mtspr)(CPUOpenRISCState *env, target_ulong spr, target_ulong rb)
         break;
     case TO_SPR(9, 0):  /* PICMR */
         env->picmr = rb;
-        qemu_mutex_lock_iothread();
+        bql_lock();
         if (env->picsr & env->picmr) {
             cpu_interrupt(cs, CPU_INTERRUPT_HARD);
         } else {
             cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
         }
-        qemu_mutex_unlock_iothread();
+        bql_unlock();
         break;
     case TO_SPR(9, 2):  /* PICSR */
         env->picsr &= ~rb;
         break;
     case TO_SPR(10, 0): /* TTMR */
         {
-            qemu_mutex_lock_iothread();
+            bql_lock();
             if ((env->ttmr & TTMR_M) ^ (rb & TTMR_M)) {
                 switch (rb & TTMR_M) {
                 case TIMER_NONE:
@@ -174,40 +196,45 @@ void HELPER(mtspr)(CPUOpenRISCState *env, target_ulong spr, target_ulong rb)
                 env->ttmr = (rb & ~TTMR_IP) | ip;
             } else {    /* Clear IP bit.  */
                 env->ttmr = rb & ~TTMR_IP;
-                cs->interrupt_request &= ~CPU_INTERRUPT_TIMER;
+                cpu_reset_interrupt(cs, CPU_INTERRUPT_TIMER);
             }
             cpu_openrisc_timer_update(cpu);
-            qemu_mutex_unlock_iothread();
+            bql_unlock();
         }
         break;
 
     case TO_SPR(10, 1): /* TTCR */
-        qemu_mutex_lock_iothread();
+        bql_lock();
         cpu_openrisc_count_set(cpu, rb);
         cpu_openrisc_timer_update(cpu);
-        qemu_mutex_unlock_iothread();
-        break;
-#endif
-
-    case TO_SPR(0, 20): /* FPCSR */
-        cpu_set_fpcsr(env, rb);
+        bql_unlock();
         break;
     }
+#endif
 }
 
-target_ulong HELPER(mfspr)(CPUOpenRISCState *env, target_ulong rd,
-                           target_ulong spr)
+uint32_t HELPER(mfspr)(CPUOpenRISCState *env, uint32_t rd, uint32_t spr)
 {
-#ifndef CONFIG_USER_ONLY
-    uint64_t data[TARGET_INSN_START_WORDS];
-    MachineState *ms = MACHINE(qdev_get_machine());
     OpenRISCCPU *cpu = env_archcpu(env);
+#ifndef CONFIG_USER_ONLY
+    uint64_t data[INSN_START_WORDS];
+    MachineState *ms = MACHINE(qdev_get_machine());
     CPUState *cs = env_cpu(env);
     int idx;
 #endif
 
+    /* Handle user accessible SPRs first.  */
     switch (spr) {
+    case TO_SPR(0, 20): /* FPCSR */
+        return env->fpcsr;
+    }
+
+    if (is_user(env)) {
+        raise_exception(cpu, EXCP_ILLEGAL);
+    }
+
 #ifndef CONFIG_USER_ONLY
+    switch (spr) {
     case TO_SPR(0, 0): /* VR */
         return env->vr;
 
@@ -320,15 +347,12 @@ target_ulong HELPER(mfspr)(CPUOpenRISCState *env, target_ulong rd,
         return env->ttmr;
 
     case TO_SPR(10, 1): /* TTCR */
-        qemu_mutex_lock_iothread();
+        bql_lock();
         cpu_openrisc_count_update(cpu);
-        qemu_mutex_unlock_iothread();
+        bql_unlock();
         return cpu_openrisc_count_get(cpu);
-#endif
-
-    case TO_SPR(0, 20): /* FPCSR */
-        return env->fpcsr;
     }
+#endif
 
     /* for rd is passed in, if rd unchanged, just keep it back.  */
     return rd;

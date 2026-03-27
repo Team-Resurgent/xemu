@@ -21,6 +21,15 @@
 #define O_PATH_9P_UTIL 0
 #endif
 
+#ifdef CONFIG_FREEBSD
+/*
+ * FreeBSD does not have these flags, so we can only emulate their intended
+ * behaviour (racily).
+ */
+#define XATTR_CREATE    0x1
+#define XATTR_REPLACE   0x2
+#endif
+
 #if !defined(CONFIG_LINUX)
 
 /*
@@ -48,7 +57,7 @@ static inline uint64_t makedev_dotl(uint32_t dev_major, uint32_t dev_minor)
 /*
  * Converts given device number from host's device number format to Linux
  * device number format. As both the size of type dev_t and encoding of
- * dev_t is system dependant, we have to convert them for Linux guests if
+ * dev_t is system dependent, we have to convert them for Linux guests if
  * host is not running Linux.
  */
 static inline uint64_t host_dev_to_dotl_dev(dev_t dev)
@@ -64,9 +73,9 @@ static inline uint64_t host_dev_to_dotl_dev(dev_t dev)
 static inline int errno_to_dotl(int err) {
 #if defined(CONFIG_LINUX)
     /* nothing to translate (Linux -> Linux) */
-#elif defined(CONFIG_DARWIN)
+#elif defined(CONFIG_DARWIN) || defined(CONFIG_FREEBSD)
     /*
-     * translation mandatory for macOS hosts
+     * translation mandatory for non-Linux hosts
      *
      * FIXME: Only most important errnos translated here yet, this should be
      * extended to as many errnos being translated as possible in future.
@@ -92,20 +101,18 @@ static inline int errno_to_dotl(int err) {
 
 #ifdef CONFIG_DARWIN
 #define qemu_fgetxattr(...) fgetxattr(__VA_ARGS__, 0, 0)
-#define qemu_lgetxattr(...) getxattr(__VA_ARGS__, 0, XATTR_NOFOLLOW)
-#define qemu_llistxattr(...) listxattr(__VA_ARGS__, XATTR_NOFOLLOW)
-#define qemu_lremovexattr(...) removexattr(__VA_ARGS__, XATTR_NOFOLLOW)
-static inline int qemu_lsetxattr(const char *path, const char *name,
-                                 const void *value, size_t size, int flags) {
-    return setxattr(path, name, value, size, 0, flags | XATTR_NOFOLLOW);
-}
 #else
 #define qemu_fgetxattr fgetxattr
-#define qemu_lgetxattr lgetxattr
-#define qemu_llistxattr llistxattr
-#define qemu_lremovexattr lremovexattr
-#define qemu_lsetxattr lsetxattr
 #endif
+
+#define qemu_openat     openat
+#define qemu_fstat      fstat
+#define qemu_fstatat    fstatat
+#define qemu_mkdirat    mkdirat
+#define qemu_renameat   renameat
+#define qemu_utimensat  utimensat
+#define qemu_unlinkat   unlinkat
+#define qemu_futimens   futimens
 
 static inline void close_preserve_errno(int fd)
 {
@@ -129,7 +136,7 @@ static inline int close_if_special_file(int fd)
 {
     struct stat stbuf;
 
-    if (fstat(fd, &stbuf) < 0) {
+    if (qemu_fstat(fd, &stbuf) < 0) {
         close_preserve_errno(fd);
         return -1;
     }
@@ -148,8 +155,8 @@ static inline int close_if_special_file(int fd)
 
 static inline int openat_dir(int dirfd, const char *name)
 {
-    return openat(dirfd, name,
-                  O_DIRECTORY | O_RDONLY | O_NOFOLLOW | O_PATH_9P_UTIL);
+    return qemu_openat(dirfd, name,
+                       O_DIRECTORY | O_RDONLY | O_NOFOLLOW | O_PATH_9P_UTIL);
 }
 
 static inline int openat_file(int dirfd, const char *name, int flags,
@@ -157,13 +164,13 @@ static inline int openat_file(int dirfd, const char *name, int flags,
 {
     int fd, serrno, ret;
 
-#ifndef CONFIG_DARWIN
+#if !defined(CONFIG_DARWIN) && !defined(CONFIG_FREEBSD)
 again:
 #endif
-    fd = openat(dirfd, name, flags | O_NOFOLLOW | O_NOCTTY | O_NONBLOCK,
-                mode);
+    fd = qemu_openat(dirfd, name, flags | O_NOFOLLOW | O_NOCTTY | O_NONBLOCK,
+                     mode);
     if (fd == -1) {
-#ifndef CONFIG_DARWIN
+#if !defined(CONFIG_DARWIN) && !defined(CONFIG_FREEBSD)
         if (errno == EPERM && (flags & O_NOATIME)) {
             /*
              * The client passed O_NOATIME but we lack permissions to honor it.
@@ -180,23 +187,33 @@ again:
         return -1;
     }
 
-    if (close_if_special_file(fd) < 0) {
-        return -1;
-    }
-
-    serrno = errno;
-    /* O_NONBLOCK was only needed to open the file. Let's drop it. We don't
-     * do that with O_PATH since fcntl(F_SETFL) isn't supported, and openat()
-     * ignored it anyway.
-     */
+    /* Only if O_PATH is not set ... */
     if (!(flags & O_PATH_9P_UTIL)) {
+        /*
+         * Prevent I/O on special files (device files, etc.) on host side,
+         * however it is safe and required to allow opening them with O_PATH,
+         * as this is limited to (required) path based operations only.
+         */
+        if (close_if_special_file(fd) < 0) {
+            return -1;
+        }
+
+        serrno = errno;
+        /*
+         * O_NONBLOCK was only needed to open the file. Let's drop it. We don't
+         * do that with O_PATH since fcntl(F_SETFL) isn't supported, and
+         * openat() ignored it anyway.
+         */
         ret = fcntl(fd, F_SETFL, flags);
         assert(!ret);
+        errno = serrno;
     }
-    errno = serrno;
     return fd;
 }
 
+#ifdef CONFIG_FREEBSD
+ssize_t fgetxattr(int dirfd, const char *name, void *value, size_t size);
+#endif
 ssize_t fgetxattrat_nofollow(int dirfd, const char *path, const char *name,
                              void *value, size_t size);
 int fsetxattrat_nofollow(int dirfd, const char *path, const char *name,
@@ -262,5 +279,11 @@ static inline struct dirent *qemu_dirent_dup(struct dirent *dent)
 int pthread_fchdir_np(int fd) __attribute__((weak_import));
 #endif
 int qemu_mknodat(int dirfd, const char *filename, mode_t mode, dev_t dev);
+
+/*
+ * Returns a newly allocated string presentation of open() flags, intended
+ * for debugging (tracing) purposes only.
+ */
+char *qemu_open_flags_tostr(int flags);
 
 #endif

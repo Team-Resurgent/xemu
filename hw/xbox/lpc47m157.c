@@ -2,7 +2,7 @@
  * QEMU SMSC LPC47M157 (Super I/O)
  *
  * Copyright (c) 2013 espes
- * Copyright (c) 2018-2021 Matt Borgerson
+ * Copyright (c) 2018-2025 Matt Borgerson
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -22,7 +22,7 @@
 #include "hw/qdev-properties.h"
 #include "hw/qdev-properties-system.h"
 #include "migration/vmstate.h"
-#include "sysemu/sysemu.h"
+#include "system/system.h"
 #include "hw/char/serial.h"
 #include "hw/isa/isa.h"
 #include "qapi/error.h"
@@ -127,7 +127,6 @@ static void update_devices(ISALPC47M157State *isa)
             memory_region_init_io(&ss->io, OBJECT(s),
                                   &serial_io_ops, ss, "serial", 8);
             isa_register_ioport(NULL, &ss->io, iobase);
-            serial_set_frequency(ss, 115200);
             serial->iobase = iobase;
             serial->irq = irq;
             serial->active = true;
@@ -277,14 +276,13 @@ static const VMStateDescription vmstate_lpc47m157 = {
     }
 };
 
-static Property lpc47m157_properties[] = {
+static const Property lpc47m157_properties[] = {
     DEFINE_PROP_BOOL("sysopt", ISALPC47M157State, sysopt, false),
     DEFINE_PROP_CHR("chardev0", ISALPC47M157State, state.serial[0].state.chr),
     DEFINE_PROP_CHR("chardev1", ISALPC47M157State, state.serial[1].state.chr),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void lpc47m157_class_init(ObjectClass *klass, void *data)
+static void lpc47m157_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 

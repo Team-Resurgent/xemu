@@ -8,6 +8,7 @@ xemu_ss.add(files(
   'input-manager.cc',
   'main-menu.cc',
   'main.cc',
+  'misc.cc',
   'menubar.cc',
   'monitor.cc',
   'notifications.cc',
@@ -22,4 +23,6 @@ xemu_ss.add(files(
   'widgets.cc',
 ))
 
-xemu_ss.add(when: 'CONFIG_WIN32', if_true: files('update.cc'))
+if host_os == 'windows'
+  xemu_ss.add(files('update.cc'))
+endif

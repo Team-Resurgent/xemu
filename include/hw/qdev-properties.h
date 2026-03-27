@@ -16,43 +16,54 @@ struct Property {
     const char   *name;
     const PropertyInfo *info;
     ptrdiff_t    offset;
-    uint8_t      bitnr;
+    const char   *link_type;
     uint64_t     bitmask;
-    bool         set_default;
     union {
         int64_t i;
         uint64_t u;
     } defval;
-    int          arrayoffset;
     const PropertyInfo *arrayinfo;
+    int          arrayoffset;
     int          arrayfieldsize;
-    const char   *link_type;
+    uint8_t      bitnr;
+    bool         set_default;
 };
 
 struct PropertyInfo {
-    const char *name;
+    const char *type;
     const char *description;
     const QEnumLookup *enum_table;
     bool realized_set_allowed; /* allow setting property on realized device */
-    int (*print)(Object *obj, Property *prop, char *dest, size_t len);
+    char *(*print)(Object *obj, const Property *prop);
     void (*set_default_value)(ObjectProperty *op, const Property *prop);
     ObjectProperty *(*create)(ObjectClass *oc, const char *name,
-                              Property *prop);
+                              const Property *prop);
     ObjectPropertyAccessor *get;
     ObjectPropertyAccessor *set;
     ObjectPropertyRelease *release;
 };
+
+/**
+ * struct OnOffAutoBit64 - OnOffAuto storage with 64 elements.
+ * @on_bits: Bitmap of elements with "on".
+ * @auto_bits: Bitmap of elements with "auto".
+ */
+typedef struct OnOffAutoBit64 {
+    uint64_t on_bits;
+    uint64_t auto_bits;
+} OnOffAutoBit64;
 
 
 /*** qdev-properties.c ***/
 
 extern const PropertyInfo qdev_prop_bit;
 extern const PropertyInfo qdev_prop_bit64;
+extern const PropertyInfo qdev_prop_on_off_auto_bit64;
 extern const PropertyInfo qdev_prop_bool;
-extern const PropertyInfo qdev_prop_enum;
 extern const PropertyInfo qdev_prop_uint8;
 extern const PropertyInfo qdev_prop_uint16;
 extern const PropertyInfo qdev_prop_uint32;
+extern const PropertyInfo qdev_prop_usize;
 extern const PropertyInfo qdev_prop_int32;
 extern const PropertyInfo qdev_prop_uint64;
 extern const PropertyInfo qdev_prop_uint64_checkmask;
@@ -61,7 +72,7 @@ extern const PropertyInfo qdev_prop_size;
 extern const PropertyInfo qdev_prop_string;
 extern const PropertyInfo qdev_prop_on_off_auto;
 extern const PropertyInfo qdev_prop_size32;
-extern const PropertyInfo qdev_prop_arraylen;
+extern const PropertyInfo qdev_prop_array;
 extern const PropertyInfo qdev_prop_link;
 
 #define DEFINE_PROP(_name, _state, _field, _prop, _type, ...) {  \
@@ -100,6 +111,13 @@ extern const PropertyInfo qdev_prop_link;
                 .set_default = true,                              \
                 .defval.u  = (bool)_defval)
 
+#define DEFINE_PROP_ON_OFF_AUTO_BIT64(_name, _state, _field, _bit, _defval) \
+    DEFINE_PROP(_name, _state, _field, qdev_prop_on_off_auto_bit64,         \
+                OnOffAutoBit64,                                             \
+                .bitnr    = (_bit),                                         \
+                .set_default = true,                                        \
+                .defval.i = (OnOffAuto)_defval)
+
 #define DEFINE_PROP_BOOL(_name, _state, _field, _defval)     \
     DEFINE_PROP(_name, _state, _field, qdev_prop_bool, bool, \
                 .set_default = true,                         \
@@ -115,8 +133,6 @@ extern const PropertyInfo qdev_prop_link;
                 .bitmask    = (_bitmask),                     \
                 .set_default = false)
 
-#define PROP_ARRAY_LEN_PREFIX "len-"
-
 /**
  * DEFINE_PROP_ARRAY:
  * @_name: name of the array
@@ -127,28 +143,25 @@ extern const PropertyInfo qdev_prop_link;
  * @_arrayprop: PropertyInfo defining what property the array elements have
  * @_arraytype: C type of the array elements
  *
- * Define device properties for a variable-length array _name.  A
- * static property "len-arrayname" is defined. When the device creator
- * sets this property to the desired length of array, further dynamic
- * properties "arrayname[0]", "arrayname[1]", ...  are defined so the
- * device creator can set the array element values. Setting the
- * "len-arrayname" property more than once is an error.
+ * Define device properties for a variable-length array _name.  The array is
+ * represented as a list in the visitor interface.
  *
- * When the array length is set, the @_field member of the device
+ * @_arraytype is required to be movable with memcpy().
+ *
+ * When the array property is set, the @_field member of the device
  * struct is set to the array length, and @_arrayfield is set to point
- * to (zero-initialised) memory allocated for the array.  For a zero
- * length array, @_field will be set to 0 and @_arrayfield to NULL.
+ * to the memory allocated for the array.
+ *
  * It is the responsibility of the device deinit code to free the
  * @_arrayfield memory.
  */
-#define DEFINE_PROP_ARRAY(_name, _state, _field,               \
-                          _arrayfield, _arrayprop, _arraytype) \
-    DEFINE_PROP((PROP_ARRAY_LEN_PREFIX _name),                 \
-                _state, _field, qdev_prop_arraylen, uint32_t,  \
-                .set_default = true,                           \
-                .defval.u = 0,                                 \
-                .arrayinfo = &(_arrayprop),                    \
-                .arrayfieldsize = sizeof(_arraytype),          \
+#define DEFINE_PROP_ARRAY(_name, _state, _field,                        \
+                          _arrayfield, _arrayprop, _arraytype)          \
+    DEFINE_PROP(_name, _state, _field, qdev_prop_array, uint32_t,       \
+                .set_default = true,                                    \
+                .defval.u = 0,                                          \
+                .arrayinfo = &(_arrayprop),                             \
+                .arrayfieldsize = sizeof(_arraytype),                   \
                 .arrayoffset = offsetof(_state, _arrayfield))
 
 #define DEFINE_PROP_LINK(_name, _state, _field, _type, _ptr_type)     \
@@ -175,9 +188,6 @@ extern const PropertyInfo qdev_prop_link;
     DEFINE_PROP_SIGNED(_n, _s, _f, _d, qdev_prop_on_off_auto, OnOffAuto)
 #define DEFINE_PROP_SIZE32(_n, _s, _f, _d)                       \
     DEFINE_PROP_UNSIGNED(_n, _s, _f, _d, qdev_prop_size32, uint32_t)
-
-#define DEFINE_PROP_END_OF_LIST()               \
-    {}
 
 /*
  * Set properties between creation and realization.
@@ -206,7 +216,10 @@ void qdev_prop_set_macaddr(DeviceState *dev, const char *name,
                            const uint8_t *value);
 void qdev_prop_set_enum(DeviceState *dev, const char *name, int value);
 
-void *object_field_prop_ptr(Object *obj, Property *prop);
+/* Takes ownership of @values */
+void qdev_prop_set_array(DeviceState *dev, const char *name, QList *values);
+
+void *object_field_prop_ptr(Object *obj, const Property *prop);
 
 void qdev_prop_register_global(GlobalProperty *prop);
 const GlobalProperty *qdev_find_global_prop(Object *obj,
@@ -225,15 +238,15 @@ void error_set_from_qdev_prop_error(Error **errp, int ret, Object *obj,
  * On error, store error in @errp.  Static properties access data in a struct.
  * The type of the QOM property is derived from prop->info.
  */
-void qdev_property_add_static(DeviceState *dev, Property *prop);
+void qdev_property_add_static(DeviceState *dev, const Property *prop);
 
 /**
  * qdev_alias_all_properties: Create aliases on source for all target properties
  * @target: Device which has properties to be aliased
  * @source: Object to add alias properties to
  *
- * Add alias properties to the @source object for all qdev properties on
- * the @target DeviceState.
+ * Add alias properties to the @source object for all properties on the @target
+ * DeviceState.
  *
  * This is useful when @target is an internal implementation object
  * owned by @source, and you want to expose all the properties of that

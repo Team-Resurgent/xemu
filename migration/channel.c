@@ -33,6 +33,7 @@
 void migration_channel_process_incoming(QIOChannel *ioc)
 {
     MigrationState *s = migrate_get_current();
+    MigrationIncomingState *mis = migration_incoming_get_current();
     Error *local_err = NULL;
 
     trace_migration_set_incoming_channel(
@@ -47,6 +48,10 @@ void migration_channel_process_incoming(QIOChannel *ioc)
 
     if (local_err) {
         error_report_err(local_err);
+        migrate_set_state(&s->state, s->state, MIGRATION_STATUS_FAILED);
+        if (mis->exit_on_error) {
+            exit(EXIT_FAILURE);
+        }
     }
 }
 
@@ -74,7 +79,7 @@ void migration_channel_connect(MigrationState *s,
             if (!error) {
                 /* tls_channel_connect will call back to this
                  * function after the TLS handshake,
-                 * so we mustn't call migrate_fd_connect until then
+                 * so we mustn't call migration_connect until then
                  */
 
                 return;
@@ -89,6 +94,49 @@ void migration_channel_connect(MigrationState *s,
             qemu_mutex_unlock(&s->qemu_file_lock);
         }
     }
-    migrate_fd_connect(s, error);
+    migration_connect(s, error);
     error_free(error);
+}
+
+
+/**
+ * @migration_channel_read_peek - Peek at migration channel, without
+ *     actually removing it from channel buffer.
+ *
+ * @ioc: the channel object
+ * @buf: the memory region to read data into
+ * @buflen: the number of bytes to read in @buf
+ * @errp: pointer to a NULL-initialized error object
+ *
+ * Returns 0 if successful, returns -1 and sets @errp if fails.
+ */
+int migration_channel_read_peek(QIOChannel *ioc,
+                                const char *buf,
+                                const size_t buflen,
+                                Error **errp)
+{
+    ssize_t len = 0;
+    struct iovec iov = { .iov_base = (char *)buf, .iov_len = buflen };
+
+    while (true) {
+        len = qio_channel_readv_full(ioc, &iov, 1, NULL, NULL,
+                                     QIO_CHANNEL_READ_FLAG_MSG_PEEK, errp);
+
+        if (len < 0 && len != QIO_CHANNEL_ERR_BLOCK) {
+            return -1;
+        }
+
+        if (len == 0) {
+            error_setg(errp, "Failed to peek at channel");
+            return -1;
+        }
+
+        if (len == buflen) {
+            break;
+        }
+
+        qio_channel_wait_cond(ioc, G_IO_IN);
+    }
+
+    return 0;
 }

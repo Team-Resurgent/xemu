@@ -2,6 +2,7 @@
  * QEMU model of the Xilinx BBRAM Battery Backed RAM
  *
  * Copyright (c) 2014-2021 Xilinx Inc.
+ * Copyright (c) 2023 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -28,7 +29,7 @@
 #include "qemu/error-report.h"
 #include "qemu/log.h"
 #include "qapi/error.h"
-#include "sysemu/blockdev.h"
+#include "system/blockdev.h"
 #include "migration/vmstate.h"
 #include "hw/qdev-properties.h"
 #include "hw/qdev-properties-system.h"
@@ -416,9 +417,9 @@ static RegisterAccessInfo bbram_ctrl_regs_info[] = {
     }
 };
 
-static void bbram_ctrl_reset(DeviceState *dev)
+static void bbram_ctrl_reset_hold(Object *obj, ResetType type)
 {
-    XlnxBBRam *s = XLNX_BBRAM(dev);
+    XlnxBBRam *s = XLNX_BBRAM(obj);
     unsigned int i;
 
     for (i = 0; i < ARRAY_SIZE(s->regs_info); ++i) {
@@ -495,7 +496,7 @@ static void bbram_prop_release_drive(Object *obj, const char *name,
 }
 
 static const PropertyInfo bbram_prop_drive = {
-    .name  = "str",
+    .type  = "str",
     .description = "Node name or ID of a block device to use as BBRAM backend",
     .realized_set_allowed = true,
     .get = bbram_prop_get_drive,
@@ -507,23 +508,23 @@ static const VMStateDescription vmstate_bbram_ctrl = {
     .name = TYPE_XLNX_BBRAM,
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, XlnxBBRam, R_MAX),
         VMSTATE_END_OF_LIST(),
     }
 };
 
-static Property bbram_ctrl_props[] = {
+static const Property bbram_ctrl_props[] = {
     DEFINE_PROP("drive", XlnxBBRam, blk, bbram_prop_drive, BlockBackend *),
     DEFINE_PROP_UINT32("crc-zpads", XlnxBBRam, crc_zpads, 1),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void bbram_ctrl_class_init(ObjectClass *klass, void *data)
+static void bbram_ctrl_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
-    dc->reset = bbram_ctrl_reset;
+    rc->phases.hold = bbram_ctrl_reset_hold;
     dc->realize = bbram_ctrl_realize;
     dc->vmsd = &vmstate_bbram_ctrl;
     device_class_set_props(dc, bbram_ctrl_props);

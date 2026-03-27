@@ -5,7 +5,6 @@ specific_ss.add(files(
 	# 'chihiro.c',
 	'eeprom_generation.c',
 	'lpc47m157.c',
-	'nvnet.c',
 	'smbus_adm1032.c',
 	'smbus_cx25871.c',
 	'smbus_fs454.c',
@@ -15,7 +14,9 @@ specific_ss.add(files(
 	'xbox.c',
 	'xbox_pci.c',
 	'xid.c',
-	'modchip_xenium.c'
+	'xblc.c',
+	'xid-gamepad.c',
+  'modchip_xenium.c',
 	))
 subdir('nv2a')
 subdir('mcpx')

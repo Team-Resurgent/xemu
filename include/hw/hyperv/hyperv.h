@@ -10,7 +10,8 @@
 #ifndef HW_HYPERV_HYPERV_H
 #define HW_HYPERV_HYPERV_H
 
-#include "cpu-qom.h"
+#include "exec/hwaddr.h"
+#include "hw/core/cpu.h"
 #include "hw/hyperv/hyperv-proto.h"
 
 typedef struct HvSintRoute HvSintRoute;
@@ -139,4 +140,8 @@ typedef struct HvSynDbgMsg {
 } HvSynDbgMsg;
 typedef uint16_t (*HvSynDbgHandler)(void *context, HvSynDbgMsg *msg);
 void hyperv_set_syndbg_handler(HvSynDbgHandler handler, void *context);
+
+bool hyperv_are_vmbus_recommended_features_enabled(void);
+void hyperv_set_vmbus_recommended_features_enabled(void);
+
 #endif

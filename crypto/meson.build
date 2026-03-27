@@ -24,17 +24,21 @@ crypto_ss.add(files(
   'rsakey.c',
 ))
 
+if gnutls.found()
+  crypto_ss.add(files(
+    'tlscredsbox.c',
+    'x509-utils.c',
+  ))
+endif
+
 if nettle.found()
   crypto_ss.add(nettle, files('hash-nettle.c', 'hmac-nettle.c', 'pbkdf-nettle.c'))
   if hogweed.found()
     crypto_ss.add(gmp, hogweed)
   endif
-  if xts == 'private'
-    crypto_ss.add(files('xts.c'))
-  endif
 elif gcrypt.found()
   crypto_ss.add(gcrypt, files('hash-gcrypt.c', 'hmac-gcrypt.c', 'pbkdf-gcrypt.c'))
-elif gnutls_crypto.found()
+elif gnutls.found()
   crypto_ss.add(gnutls, files('hash-gnutls.c', 'hmac-gnutls.c', 'pbkdf-gnutls.c'))
 else
   crypto_ss.add(files('hash-glib.c', 'hmac-glib.c', 'pbkdf-stub.c'))
@@ -46,11 +50,15 @@ endif
 if have_afalg
   crypto_ss.add(if_true: files('afalg.c', 'cipher-afalg.c', 'hash-afalg.c'))
 endif
-crypto_ss.add(when: gnutls, if_true: files('tls-cipher-suites.c'))
 
-util_ss.add(files('sm4.c'))
-util_ss.add(files('aes.c'))
-util_ss.add(files('init.c'))
+system_ss.add(when: gnutls, if_true: files('tls-cipher-suites.c'))
+
+util_ss.add(files(
+  'aes.c',
+  'clmul.c',
+  'init.c',
+  'sm4.c',
+))
 if gnutls.found()
   util_ss.add(gnutls)
 endif

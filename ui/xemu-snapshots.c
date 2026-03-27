@@ -1,7 +1,7 @@
 /*
  * xemu User Interface
  *
- * Copyright (C) 2020-2022 Matt Borgerson
+ * Copyright (C) 2020-2025 Matt Borgerson
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,18 +21,19 @@
 #include "xemu-settings.h"
 #include "xemu-xbe.h"
 
-#include <SDL2/SDL.h>
+#include <SDL3/SDL.h>
 #include <epoxy/gl.h>
 
 #include "block/aio.h"
 #include "block/block_int.h"
 #include "block/qapi.h"
 #include "block/qdict.h"
+#include "block/block-io.h"
 #include "migration/qemu-file.h"
 #include "migration/snapshot.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-block.h"
-#include "sysemu/runstate.h"
+#include "system/runstate.h"
 
 #include "ui/console.h"
 #include "ui/input.h"
@@ -168,8 +169,8 @@ static void xemu_snapshots_all_load_data(QEMUSnapshotInfo **info,
 
     bdrv_flush(bs_ro);
     bdrv_drain(bs_ro);
+    assert(bs_ro->refcnt == 1);
     bdrv_unref(bs_ro);
-    assert(bs_ro->refcnt == 0);
     if (!(*err))
         xemu_snapshots_dirty = false;
 }
@@ -178,7 +179,6 @@ int xemu_snapshots_list(QEMUSnapshotInfo **info, XemuSnapshotData **extra_data,
                         Error **err)
 {
     BlockDriverState *bs;
-    AioContext *aio_context;
     int snapshots_len;
     assert(err);
 
@@ -195,11 +195,7 @@ int xemu_snapshots_list(QEMUSnapshotInfo **info, XemuSnapshotData **extra_data,
         return -1;
     }
 
-    aio_context = bdrv_get_aio_context(bs);
-
-    aio_context_acquire(aio_context);
     snapshots_len = bdrv_snapshot_list(bs, &xemu_snapshots_metadata);
-    aio_context_release(aio_context);
     xemu_snapshots_all_load_data(&xemu_snapshots_metadata,
                                  &xemu_snapshots_extra_data, snapshots_len,
                                  err);
@@ -233,11 +229,8 @@ char *xemu_get_currently_loaded_disc_path(void)
             continue;
         }
 
-        if (info->value->has_inserted) {
-            BlockDeviceInfo *inserted = info->value->inserted;
-            if (inserted->has_node_name) {
-                file = g_strdup(inserted->file);
-            }
+        if (info->value->inserted && info->value->inserted->node_name) {
+            file = g_strdup(info->value->inserted->file);
         }
     }
 

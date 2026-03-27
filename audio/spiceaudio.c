@@ -22,10 +22,11 @@
 #include "qemu/module.h"
 #include "qemu/error-report.h"
 #include "qemu/timer.h"
+#include "qapi/error.h"
 #include "ui/qemu-spice.h"
 
 #define AUDIO_CAP "spice"
-#include "audio.h"
+#include "qemu/audio.h"
 #include "audio_int.h"
 
 #if SPICE_INTERFACE_PLAYBACK_MAJOR > 1 || SPICE_INTERFACE_PLAYBACK_MINOR >= 3
@@ -71,11 +72,13 @@ static const SpiceRecordInterface record_sif = {
     .base.minor_version = SPICE_INTERFACE_RECORD_MINOR,
 };
 
-static void *spice_audio_init(Audiodev *dev)
+static void *spice_audio_init(Audiodev *dev, Error **errp)
 {
     if (!using_spice) {
+        error_setg(errp, "Cannot use spice audio without -spice");
         return NULL;
     }
+
     return &spice_audio_init;
 }
 
@@ -99,7 +102,7 @@ static int line_out_init(HWVoiceOut *hw, struct audsettings *as,
 #endif
     settings.nchannels  = SPICE_INTERFACE_PLAYBACK_CHAN;
     settings.fmt        = AUDIO_FORMAT_S16;
-    settings.endianness = AUDIO_HOST_ENDIANNESS;
+    settings.endianness = HOST_BIG_ENDIAN;
 
     audio_pcm_init_info (&hw->info, &settings);
     hw->samples = LINE_OUT_SAMPLES;
@@ -215,7 +218,7 @@ static int line_in_init(HWVoiceIn *hw, struct audsettings *as, void *drv_opaque)
 #endif
     settings.nchannels  = SPICE_INTERFACE_RECORD_CHAN;
     settings.fmt        = AUDIO_FORMAT_S16;
-    settings.endianness = AUDIO_HOST_ENDIANNESS;
+    settings.endianness = HOST_BIG_ENDIAN;
 
     audio_pcm_init_info (&hw->info, &settings);
     hw->samples = LINE_IN_SAMPLES;
@@ -313,7 +316,6 @@ static struct audio_pcm_ops audio_callbacks = {
 
 static struct audio_driver spice_audio_driver = {
     .name           = "spice",
-    .descr          = "spice audio driver",
     .init           = spice_audio_init,
     .fini           = spice_audio_fini,
     .pcm_ops        = &audio_callbacks,

@@ -30,7 +30,7 @@
 #include "net/checksum.h"
 #include "qemu/module.h"
 #include "exec/cpu-common.h"
-#include "sysemu/dma.h"
+#include "system/dma.h"
 #include "hw/net/allwinner-sun8i-emac.h"
 
 /* EMAC register offsets */
@@ -671,7 +671,7 @@ static uint64_t allwinner_sun8i_emac_read(void *opaque, hwaddr offset,
         break;
     default:
         qemu_log_mask(LOG_UNIMP, "allwinner-h3-emac: read access to unknown "
-                                 "EMAC register 0x" TARGET_FMT_plx "\n",
+                                 "EMAC register 0x" HWADDR_FMT_plx "\n",
                                   offset);
     }
 
@@ -768,7 +768,7 @@ static void allwinner_sun8i_emac_write(void *opaque, hwaddr offset,
         break;
     default:
         qemu_log_mask(LOG_UNIMP, "allwinner-h3-emac: write access to unknown "
-                                 "EMAC register 0x" TARGET_FMT_plx "\n",
+                                 "EMAC register 0x" HWADDR_FMT_plx "\n",
                                   offset);
     }
 }
@@ -784,7 +784,7 @@ static void allwinner_sun8i_emac_set_link(NetClientState *nc)
 static const MemoryRegionOps allwinner_sun8i_emac_mem_ops = {
     .read = allwinner_sun8i_emac_read,
     .write = allwinner_sun8i_emac_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = {
         .min_access_size = 4,
         .max_access_size = 4,
@@ -824,16 +824,16 @@ static void allwinner_sun8i_emac_realize(DeviceState *dev, Error **errp)
 
     qemu_macaddr_default_if_unset(&s->conf.macaddr);
     s->nic = qemu_new_nic(&net_allwinner_sun8i_emac_info, &s->conf,
-                           object_get_typename(OBJECT(dev)), dev->id, s);
+                          object_get_typename(OBJECT(dev)), dev->id,
+                          &dev->mem_reentrancy_guard, s);
     qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
 }
 
-static Property allwinner_sun8i_emac_properties[] = {
+static const Property allwinner_sun8i_emac_properties[] = {
     DEFINE_NIC_PROPERTIES(AwSun8iEmacState, conf),
     DEFINE_PROP_UINT8("phy-addr", AwSun8iEmacState, mii_phy_addr, 0),
     DEFINE_PROP_LINK("dma-memory", AwSun8iEmacState, dma_mr,
                      TYPE_MEMORY_REGION, MemoryRegion *),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static int allwinner_sun8i_emac_post_load(void *opaque, int version_id)
@@ -850,7 +850,7 @@ static const VMStateDescription vmstate_aw_emac = {
     .version_id = 1,
     .minimum_version_id = 1,
     .post_load = allwinner_sun8i_emac_post_load,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT8(mii_phy_addr, AwSun8iEmacState),
         VMSTATE_UINT32(mii_cmd, AwSun8iEmacState),
         VMSTATE_UINT32(mii_data, AwSun8iEmacState),
@@ -875,12 +875,13 @@ static const VMStateDescription vmstate_aw_emac = {
     }
 };
 
-static void allwinner_sun8i_emac_class_init(ObjectClass *klass, void *data)
+static void allwinner_sun8i_emac_class_init(ObjectClass *klass,
+                                            const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = allwinner_sun8i_emac_realize;
-    dc->reset = allwinner_sun8i_emac_reset;
+    device_class_set_legacy_reset(dc, allwinner_sun8i_emac_reset);
     dc->vmsd = &vmstate_aw_emac;
     device_class_set_props(dc, allwinner_sun8i_emac_properties);
 }

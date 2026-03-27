@@ -7,8 +7,8 @@
  * See the COPYING file in the top-level directory.
  */
 
-#ifndef SYSEMU_CPU_OPS_H
-#define SYSEMU_CPU_OPS_H
+#ifndef SYSTEM_CPU_OPS_H
+#define SYSTEM_CPU_OPS_H
 
 #include "hw/core/cpu.h"
 
@@ -17,9 +17,13 @@
  */
 typedef struct SysemuCPUOps {
     /**
+     * @has_work: Callback for checking if there is work to do.
+     */
+    bool (*has_work)(CPUState *cpu); /* MANDATORY NON-NULL */
+    /**
      * @get_memory_mapping: Callback for obtaining the memory mappings.
      */
-    void (*get_memory_mapping)(CPUState *cpu, MemoryMappingList *list,
+    bool (*get_memory_mapping)(CPUState *cpu, MemoryMappingList *list,
                                Error **errp);
     /**
      * @get_paging_enabled: Callback for inquiring whether paging is enabled.
@@ -89,4 +93,4 @@ typedef struct SysemuCPUOps {
 
 } SysemuCPUOps;
 
-#endif /* SYSEMU_CPU_OPS_H */
+#endif /* SYSTEM_CPU_OPS_H */
